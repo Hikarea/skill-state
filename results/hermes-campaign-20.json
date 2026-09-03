@@ -1,0 +1,82 @@
+{
+  "environment": {
+    "os": "Windows",
+    "harness": "Hermes Agent v0.21.0",
+    "model": "gpt-5.6-terra",
+    "provider": "openai-codex",
+    "hermes_patch_sha256": "7d36a4a9d7bdd696895bd1d2b0832146a4fe8f38902dc3e66743490c5f49b959"
+  },
+  "design": {
+    "paired_runs": 20,
+    "seed_range": [
+      200,
+      219
+    ],
+    "order_balancing": "10/10 overall; 2/2 per notebook-count stratum; 2/3 or 3/2 per filler-size stratum",
+    "variation": "2-6 transient notebooks and 40-160 filler lines per notebook",
+    "total_api_calls": 300
+  },
+  "functional_pass_rate": 1.0,
+  "latency_gate_pass_rate": 0.25,
+  "overall_pass_rate": 0.25,
+  "vanilla_accuracy": 1.0,
+  "state_only_accuracy": 1.0,
+  "missing_fact_block_rate": 1.0,
+  "two_call_prompt_isolation_rate": 1.0,
+  "state_only_faster_runs": 3,
+  "metrics": {
+    "context_input_token_savings_percent": {
+      "mean": 47.1,
+      "median": 47.7,
+      "stdev": 12.1,
+      "min": 21.7,
+      "max": 65.7
+    },
+    "total_processed_token_savings_percent": {
+      "mean": 46.5,
+      "median": 47.1,
+      "stdev": 12.2,
+      "min": 21.0,
+      "max": 65.3
+    },
+    "final_turn_input_savings_percent": {
+      "mean": 72.2,
+      "median": 76.0,
+      "stdev": 12.5,
+      "min": 43.2,
+      "max": 88.2
+    },
+    "wall_time_change_percent": {
+      "mean": 17.1,
+      "median": 14.1,
+      "stdev": 16.1,
+      "min": -8.1,
+      "max": 57.7
+    }
+  },
+  "all_runs_passed_functional_gate": true,
+  "all_runs_reduced_processed_tokens": true,
+  "reports": [
+    "runs/seed-0200/report.json",
+    "runs/seed-0201/report.json",
+    "runs/seed-0202/report.json",
+    "runs/seed-0203/report.json",
+    "runs/seed-0204/report.json",
+    "runs/seed-0205/report.json",
+    "runs/seed-0206/report.json",
+    "runs/seed-0207/report.json",
+    "runs/seed-0208/report.json",
+    "runs/seed-0209/report.json",
+    "runs/seed-0210/report.json",
+    "runs/seed-0211/report.json",
+    "runs/seed-0212/report.json",
+    "runs/seed-0213/report.json",
+    "runs/seed-0214/report.json",
+    "runs/seed-0215/report.json",
+    "runs/seed-0216/report.json",
+    "runs/seed-0217/report.json",
+    "runs/seed-0218/report.json",
+    "runs/seed-0219/report.json"
+  ],
+  "scope": "Synthetic task-family POC; not a general accuracy, speed, billing, or production-performance claim."
+}

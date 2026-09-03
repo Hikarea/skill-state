@@ -1,0 +1,57 @@
+{
+  "seed": 208,
+  "order": "vanilla-first",
+  "workload": "7 turns; 3 durable facts; 5 transient notebooks; 40 lines each",
+  "vanilla": {
+    "mode": "vanilla",
+    "correct": true,
+    "answer": "tag-0208|zone-556|rel-473",
+    "input_tokens": 10286,
+    "cache_read_tokens": 26880,
+    "context_input_tokens": 37166,
+    "output_tokens": 185,
+    "api_calls": 7,
+    "final_input_tokens": 1084,
+    "final_context_input_tokens": 6972,
+    "wall_seconds": 49.619,
+    "model": "gpt-5.6-terra",
+    "provider": "openai-codex"
+  },
+  "state_only": {
+    "mode": "state_only",
+    "correct": true,
+    "answer": "tag-0208|zone-556|rel-473",
+    "input_tokens": 10558,
+    "cache_read_tokens": 12544,
+    "context_input_tokens": 23102,
+    "output_tokens": 479,
+    "api_calls": 7,
+    "final_input_tokens": 897,
+    "final_context_input_tokens": 2689,
+    "wall_seconds": 56.015,
+    "model": "gpt-5.6-terra",
+    "provider": "openai-codex",
+    "state_bytes": 192
+  },
+  "context_input_token_savings_percent": 37.841038,
+  "total_processed_token_savings_percent": 36.866483,
+  "final_turn_input_savings_percent": 61.43144,
+  "wall_time_change_percent": 12.890224,
+  "safety": {
+    "missing_fact_blocked": true,
+    "missing_fact_response": {
+      "status": "blocked",
+      "message": "UNKNOWN_DEPLOYMENT_KEY",
+      "state_patch_json": "{\"objective\":\"Answer only known facts\",\"facts\":{},\"pending\":[\"Obtain deployment key\"]}",
+      "action_argv": []
+    },
+    "two_call_prompt_isolation": true,
+    "isolation_responses": [
+      "isolate-A208",
+      "isolate-B208"
+    ]
+  },
+  "functional_passed": true,
+  "latency_gate_passed": false,
+  "passed": false
+}

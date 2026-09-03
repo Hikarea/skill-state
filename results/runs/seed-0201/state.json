@@ -1,0 +1,9 @@
+{
+  "objective": "Retain the three durable project facts",
+  "facts": {
+    "project_tag": "tag-0201",
+    "region": "zone-437",
+    "release_label": "rel-256"
+  },
+  "pending": []
+}

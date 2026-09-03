@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-state-runtime"
+version = "0.1.0"
+description = "Harness-neutral runtime for bounded structured execution state"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["jsonschema>=4,<5"]
+
+[project.scripts]
+skill-state = "skill_state:main"
+
+[tool.setuptools]
+py-modules = ["skill_state"]
