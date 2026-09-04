@@ -21,7 +21,7 @@ The runtime enforces:
 - procedure and schema hash checks before transitions
 - atomic state-file replacement and one writer per run
 - workspace-confined filesystem capabilities; no model-selected subprocesses
-- durable action-result and append-only state-audit records
+- durable transition intents, action results, and append-only state-audit records
 
 The Python runtime uses the standard library plus `jsonschema`.
 
@@ -74,9 +74,9 @@ The plugin is installed separately into Hermes and uses its context-engine and t
 python .\integrations\install_hermes.py
 ```
 
-Restart Hermes Desktop, its gateway, or the CLI after installation. The plugin saves a validated checkpoint through an internal tool and replaces prior completed-turn messages with that checkpoint at the next user turn. It deliberately preserves system/developer messages and active tool loops. It does not delete Hermes' local audit history.
+Restart Hermes Desktop, its gateway, or the CLI after installation. The plugin saves a validated checkpoint through an internal tool and promotes it only after Hermes reports that the turn completed successfully. At the next user turn, it replaces prior completed-turn messages with that checkpoint while retaining stable system/developer messages and only the current turn's assistant/tool messages. A missed or invalid checkpoint fails open for the following turn instead of compacting from stale state. It does not delete Hermes' local audit history.
 
-The plugin contains no marker parser and no output-transformation hook. Its contract tests verify persistence, invalid-state rejection, next-turn context selection, and preservation of an active tool loop.
+The plugin contains no marker parser and no output-transformation hook. Checkpoints are limited to 16 KiB, 32 entries per list, 2,000 characters for `objective`/`next`, and 1,000 characters per list entry. Its contract tests verify persistence, freshness, deterministic bounds, next-turn context selection, and current-turn tool-loop isolation.
 
 ## Committed experiment
 

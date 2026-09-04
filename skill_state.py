@@ -372,10 +372,6 @@ def transition(run_dir: Path, observation: str, execute: bool) -> tuple[dict, st
     if envelope["status"] == "continue" and not envelope["action_argv"]:
         raise ValueError("continue response requires an action")
     next_doc = {"revision": state_doc["revision"] + 1, "state": candidate}
-    if not envelope["action_argv"]:
-        write_json(run_dir / "state.json", next_doc)
-        append_audit(run_dir, next_doc["revision"], observation, envelope, usage)
-        return envelope, None
     intent = {
         "id": f"r{next_doc['revision']}-{time.time_ns()}", "phase": "state_pending",
         "base_revision": state_doc["revision"], "revision": next_doc["revision"],
@@ -387,7 +383,7 @@ def transition(run_dir: Path, observation: str, execute: bool) -> tuple[dict, st
     return envelope, execute_intent(run_dir, config, intent)
 
 
-def execute_intent(run_dir: Path, config: dict, intent: dict) -> str:
+def execute_intent(run_dir: Path, config: dict, intent: dict) -> str | None:
     pending_path = run_dir / "pending-action.json"
     intent["phase"] = "started"
     write_json(pending_path, intent)
@@ -518,6 +514,11 @@ def self_test() -> None:
         response, action_observation = transition(run_dir, "finish without action", True)
         assert response["status"] == "done" and action_observation is None
         assert read_json(run_dir / "state.json")["revision"] == 2
+        assert len(list((run_dir / "actions").glob("*.json"))) == 2
+        assert all(
+            json.loads(line)["transition_id"]
+            for line in (run_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        )
         denied = dict(envelope, state_patch_json=json.dumps({"todo": ["retained"]}), action_argv=["not_allowed"], status="done")
         config["command"] = [sys.executable, "-c", f"print({json.dumps(json.dumps(denied))})"]
         write_json(run_dir / "config.json", config)

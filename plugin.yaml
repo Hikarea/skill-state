@@ -1,6 +1,4 @@
 name: skill-state
-version: "0.2.0"
+version: "0.3.0"
 description: Standalone bounded-state context plugin for Hermes
 license: MIT
-provides_tools:
-  - skill_state_checkpoint
