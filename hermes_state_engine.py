@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from agent.context_engine import ContextEngine
+from agent.context_compressor import ContextCompressor
 
 
 _STATUSES = {"active", "done", "blocked"}
@@ -170,18 +170,13 @@ def state_prompt(_: dict[str, Any]) -> str:
     return """SKILL.state protocol: Before each final user-facing answer, call the internal skill_state_checkpoint tool once with a compact, complete JSON state: objective, status (active|done|blocked), completed, pending, facts, blockers, next. A missed or invalid checkpoint disables compaction for the following turn. Do not put state or protocol text in the user-facing answer."""
 
 
-class SkillStateEngine(ContextEngine):
-    """Replace prior-turn transcript with the current validated checkpoint."""
+class SkillStateEngine(ContextCompressor):
+    """Layer checkpoint selection over Hermes' native compressor."""
 
     emit_automatic_compaction_status = False
 
     def __init__(self) -> None:
-        self.last_prompt_tokens = 0
-        self.last_completion_tokens = 0
-        self.last_total_tokens = 0
-        self.threshold_tokens = 0
-        self.context_length = 0
-        self.compression_count = 0
+        super().__init__(model="", quiet_mode=True)
         self._session_id: str | None = None
         self._active_turn: str | None = None
         self._active_state: dict[str, Any] | None = None
@@ -191,27 +186,25 @@ class SkillStateEngine(ContextEngine):
         return "skill-state"
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "SkillStateEngine":
-        copy = type(self)()
-        copy.context_length = self.context_length
-        return copy
+        return type(self)()
 
-    def on_session_start(self, session_id: str, **_: Any) -> None:
+    def on_session_start(self, session_id: str, **kwargs: Any) -> None:
+        super().on_session_start(session_id, **kwargs)
         self._session_id = session_id
         self._active_turn = None
         self._active_state = None
         with _LOCK:
             _ACTIVE_TURNS.pop(session_id, None)
 
-    def update_from_response(self, usage: dict[str, Any]) -> None:
-        self.last_prompt_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
-        self.last_completion_tokens = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
-        self.last_total_tokens = int(usage.get("total_tokens", self.last_prompt_tokens + self.last_completion_tokens) or 0)
-
-    def should_compress(self, prompt_tokens: int | None = None) -> bool:
-        return False
-
-    def compress(self, messages: list[dict[str, Any]], **_: Any) -> list[dict[str, Any]]:
-        return messages
+    def on_session_reset(self) -> None:
+        session_id = self._session_id
+        super().on_session_reset()
+        if session_id:
+            with _LOCK:
+                _ACTIVE_TURNS.pop(session_id, None)
+        self._session_id = None
+        self._active_turn = None
+        self._active_state = None
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [CHECKPOINT_SCHEMA]

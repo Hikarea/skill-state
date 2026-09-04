@@ -17,11 +17,12 @@ Prompt size is bounded only when `P`, `S_t`, and `O_t` are themselves bounded. T
 The runtime enforces:
 
 - JSON Schema validation before state commits
+- a 16 KiB serialized-state limit at every state trust boundary
 - 0-3 fresh-call repair attempts after invalid model output (default: two)
 - procedure and schema hash checks before transitions
-- atomic state-file replacement and one writer per run
+- atomic state-file replacement and an OS-released one-writer lock per run
 - workspace-confined filesystem capabilities; no model-selected subprocesses
-- durable transition intents, action results, and append-only state-audit records
+- durable transition intents, action results, failed-action feedback, and append-only state-audit records
 
 The Python runtime uses the standard library plus `jsonschema`.
 
@@ -64,7 +65,7 @@ skill-state recover repair-api --result failed
 
 ## Harness adapters
 
-Adapters are implemented for fresh, noninteractive Codex CLI, Claude Code, Hermes, and arbitrary commands that accept a prompt on standard input and return the five-field JSON envelope. Their presence is not a performance claim; this repository's committed experiment used only Hermes.
+Adapters are implemented for fresh, noninteractive Codex CLI, Claude Code, Hermes, and arbitrary commands that accept a prompt on standard input and return the five-field JSON envelope. The Hermes adapter uses `chat --query-file - --oneshot`, so the prompt is sent on standard input instead of a command-line argument. Adapter presence is not a performance claim; this repository's committed experiment used only Hermes.
 
 ### Standalone Hermes plugin
 
@@ -74,9 +75,9 @@ The plugin is installed separately into Hermes and uses its context-engine and t
 python .\integrations\install_hermes.py
 ```
 
-Restart Hermes Desktop, its gateway, or the CLI after installation. The plugin saves a validated checkpoint through an internal tool and promotes it only after Hermes reports that the turn completed successfully. At the next user turn, it replaces prior completed-turn messages with that checkpoint while retaining stable system/developer messages and only the current turn's assistant/tool messages. A missed or invalid checkpoint fails open for the following turn instead of compacting from stale state. It does not delete Hermes' local audit history.
+Restart Hermes Desktop, its gateway, or the CLI after installation. The plugin saves a validated checkpoint through an internal tool and promotes it only after Hermes reports that the turn completed successfully. At the next user turn, it replaces prior completed-turn messages with that checkpoint while retaining stable system/developer messages and only the current turn's assistant/tool messages. A missed or invalid checkpoint fails open for the following turn instead of compacting from stale state. Long current-turn tool loops still use Hermes' native compressor. The plugin does not delete Hermes' local audit history. If you override Hermes toolsets on the command line, include `context_engine`; otherwise the checkpoint tool is intentionally unavailable.
 
-The plugin contains no marker parser and no output-transformation hook. Checkpoints are limited to 16 KiB, 32 entries per list, 2,000 characters for `objective`/`next`, and 1,000 characters per list entry. Its contract tests verify persistence, freshness, deterministic bounds, next-turn context selection, and current-turn tool-loop isolation.
+The plugin contains no marker parser and no output-transformation hook. Checkpoints are limited to 16 KiB, 32 entries per list, 2,000 characters for `objective`/`next`, and 1,000 characters per list entry. Its contract tests verify persistence, freshness, deterministic bounds, next-turn context selection, and native-compressor composition.
 
 ## Committed experiment
 

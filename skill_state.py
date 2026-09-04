@@ -20,6 +20,7 @@ from jsonschema.exceptions import SchemaError
 HOME = Path.home() / ".skillstate"
 CAPABILITIES = {"list_files", "read_text", "write_text", "mkdir"}
 MAX_ACTION_BYTES = 100_000
+MAX_STATE_BYTES = 16_384
 ENVELOPE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -69,19 +70,51 @@ def validate(value, schema, path="state") -> None:
         raise ValueError(f"{path}{'.' + location if location else ''}: {errors[0].message}")
 
 
+def validate_state(value, schema, path="state") -> None:
+    validate(value, schema, path)
+    try:
+        size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{path}: invalid Unicode") from exc
+    if size > MAX_STATE_BYTES:
+        raise ValueError(f"{path}: exceeds {MAX_STATE_BYTES} bytes")
+
+
 @contextmanager
 def run_lock(run_dir: Path):
     lock = run_dir / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.touch(exist_ok=True)
+    file = lock.open("r+b")
     try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError as exc:
+        if not lock.stat().st_size:
+            file.write(b"\0")
+            file.flush()
+        file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        file.close()
         raise RuntimeError(f"run locked: {lock}") from exc
     try:
+        file.seek(0)
+        file.truncate()
+        file.write(str(os.getpid()).encode())
+        file.flush()
         yield
     finally:
-        lock.unlink(missing_ok=True)
+        file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+        file.close()
 
 
 def prompt_for(spec: str, schema: dict, state: dict, observation: str, capabilities: list[str] | None = None) -> str:
@@ -121,7 +154,7 @@ def harness_command(config: dict, schema_path: Path, output_path: Path, prompt: 
         command = ["hermes", "--ignore-rules", "--reasoning", "minimal", "--toolsets", "state-only"]
         if usage_path is not None:
             command += ["--usage-file", str(usage_path)]
-        return [*command, "--oneshot", prompt]
+        return [*command, "chat", "--query-file", "-", "--oneshot"]
     return config["command"]
 
 
@@ -152,7 +185,7 @@ def invoke(config: dict, prompt: str) -> tuple[dict, dict | None]:
         output_path = temp_dir / "output.json"
         usage_path = temp_dir / "usage.json"
         write_json(schema_path, ENVELOPE_SCHEMA)
-        result = subprocess.run(harness_command(config, schema_path, output_path, prompt, usage_path), input=None if harness == "hermes" else prompt, text=True, encoding="utf-8", capture_output=True, cwd=config["workspace"], timeout=config["model_timeout_seconds"])
+        result = subprocess.run(harness_command(config, schema_path, output_path, prompt, usage_path), input=prompt, text=True, encoding="utf-8", capture_output=True, cwd=config["workspace"], timeout=config["model_timeout_seconds"])
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout).strip()[-2000:])
         usage = read_json(usage_path) if usage_path.exists() else None
@@ -168,7 +201,7 @@ def propose(config: dict, prompt: str, state: dict, schema: dict) -> tuple[dict,
             usages.append(usage)
             patch = json.loads(envelope["state_patch_json"])
             candidate = merge_patch(state, patch)
-            validate(candidate, schema)
+            validate_state(candidate, schema)
             return envelope, candidate, usage if len(usages) == 1 else {"attempts": usages}
         except (ValueError, json.JSONDecodeError) as exc:
             if attempt + 1 == attempts:
@@ -318,11 +351,19 @@ def append_audit(run_dir: Path, revision: int, observation: str, envelope: dict,
 def finish_intent(run_dir: Path, intent: dict) -> None:
     record = {key: intent.get(key) for key in ("id", "phase", "revision", "response", "action_observation", "error")}
     write_json(run_dir / "actions" / f"{intent['id']}.json", record)
+    if intent.get("phase") == "failed":
+        action = intent.get("response", {}).get("action_argv", [])
+        write_json(run_dir / "action-feedback.json", {
+            "transition_id": intent["id"],
+            "capability": action[0] if action else None,
+            "ok": False,
+            "error": intent.get("error") or "action failed",
+        })
     (run_dir / "pending-action.json").unlink(missing_ok=True)
 
 
 def prepare_intent(run_dir: Path, schema: dict, intent: dict) -> dict:
-    validate(intent["next_state"], schema)
+    validate_state(intent["next_state"], schema)
     state_doc = read_json(run_dir / "state.json")
     if state_doc["revision"] == intent["base_revision"]:
         write_json(run_dir / "state.json", {"revision": intent["revision"], "state": intent["next_state"]})
@@ -338,6 +379,11 @@ def prepare_intent(run_dir: Path, schema: dict, intent: dict) -> dict:
         )
     intent["phase"] = "prepared"
     write_json(run_dir / "pending-action.json", intent)
+    feedback_path = run_dir / "action-feedback.json"
+    if intent.get("feedback_transition_id") is not None and feedback_path.exists():
+        feedback = read_json(feedback_path)
+        if feedback.get("transition_id") == intent["feedback_transition_id"]:
+            feedback_path.unlink()
     return intent
 
 
@@ -362,9 +408,20 @@ def transition(run_dir: Path, observation: str, execute: bool) -> tuple[dict, st
         else:
             raise RuntimeError("unresolved action outcome; run skill-state recover")
     state_doc = read_json(run_dir / "state.json")
+    validate_state(state_doc["state"], schema)
+    feedback_path = run_dir / "action-feedback.json"
+    feedback = read_json(feedback_path) if feedback_path.exists() else None
+    effective_observation = observation
+    if feedback is not None:
+        effective_observation = (
+            "Previous action result (durable runtime observation):\n"
+            + json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nLatest external observation:\n"
+            + observation
+        )
     prompt = prompt_for(
         (run_dir / "spec.md").read_text(encoding="utf-8"), schema,
-        state_doc["state"], observation, config["allowed_capabilities"],
+        state_doc["state"], effective_observation, config["allowed_capabilities"],
     )
     envelope, candidate, usage = propose(config, prompt, state_doc["state"], schema)
     if not execute:
@@ -375,7 +432,8 @@ def transition(run_dir: Path, observation: str, execute: bool) -> tuple[dict, st
     intent = {
         "id": f"r{next_doc['revision']}-{time.time_ns()}", "phase": "state_pending",
         "base_revision": state_doc["revision"], "revision": next_doc["revision"],
-        "next_state": candidate, "observation": observation, "usage": usage, "response": envelope,
+        "next_state": candidate, "observation": effective_observation, "usage": usage, "response": envelope,
+        "feedback_transition_id": feedback.get("transition_id") if feedback else None,
         "action_observation": None, "error": None,
     }
     write_json(pending_path, intent)
@@ -409,7 +467,7 @@ def command_init(args) -> None:
         raise RuntimeError(f"run exists: {run_dir}")
     schema = read_json(Path(args.schema))
     state = read_json(Path(args.state))
-    validate(state, schema)
+    validate_state(state, schema)
     run_dir.mkdir(parents=True)
     (run_dir / "spec.md").write_text(Path(args.spec).read_text(encoding="utf-8"), encoding="utf-8")
     write_json(run_dir / "schema.json", schema)
@@ -479,8 +537,13 @@ def self_test() -> None:
     schema = {"type": "object", "properties": {"todo": {"type": "array", "items": {"type": "string"}}, "meta": {"type": "object", "additionalProperties": {"type": "string"}}}, "required": ["todo", "meta"], "additionalProperties": False}
     state = {"todo": ["a"], "meta": {"old": "x"}}
     merged = merge_patch(state, {"todo": [], "meta": {"old": None, "new": "y"}})
-    validate(merged, schema)
+    validate_state(merged, schema)
     assert merged == {"todo": [], "meta": {"new": "y"}}
+    try:
+        validate_state({"todo": ["x" * MAX_STATE_BYTES], "meta": {}}, schema)
+        raise AssertionError("oversized state accepted")
+    except ValueError as exc:
+        assert "exceeds" in str(exc)
     prompt = prompt_for("do work", schema, merged, "latest only")
     assert "latest only" in prompt and "old observation" not in prompt
     codex_command = harness_command({"harness": "codex"}, Path("schema"), Path("output"))
@@ -488,7 +551,8 @@ def self_test() -> None:
     hermes_command = harness_command({"harness": "hermes"}, Path("schema"), Path("output"), "latest only")
     assert "--ephemeral" in codex_command and "--output-schema" in codex_command
     assert "--no-session-persistence" in claude_command and "--json-schema" in claude_command
-    assert "--oneshot" in hermes_command and "state-only" in hermes_command and hermes_command[-1] == "latest only"
+    assert hermes_command[-4:] == ["chat", "--query-file", "-", "--oneshot"]
+    assert "state-only" in hermes_command and "latest only" not in hermes_command
     envelope = {"state_patch_json": json.dumps({"todo": []}), "action_argv": ["write_text", "result.txt", "next observation"], "action_cwd": "", "status": "continue", "message": "ok"}
     assert parse_response("claude", json.dumps({"structured_output": envelope}), Path("unused")) == envelope
     assert parse_response("claude", json.dumps({"result": json.dumps(envelope)}), Path("unused")) == envelope
@@ -530,14 +594,24 @@ def self_test() -> None:
         assert read_json(run_dir / "state.json") == {"revision": 3, "state": {"todo": ["retained"], "meta": {"old": "x"}}}
         assert not (run_dir / "pending-action.json").exists()
         assert any(read_json(path)["phase"] == "failed" for path in (run_dir / "actions").glob("*.json"))
+        assert read_json(run_dir / "action-feedback.json")["capability"] == "not_allowed"
 
         retried = dict(done, state_patch_json=json.dumps({"todo": ["retried"]}))
         marker = run_dir / "retry.marker"
-        retry_code = f"from pathlib import Path; p=Path({str(marker)!r}); print({json.dumps(json.dumps(retried))} if p.exists() else '{{}}'); p.touch()"
+        captured = run_dir / "captured-prompt.txt"
+        retry_code = (
+            f"import sys; from pathlib import Path; p=Path({str(marker)!r}); "
+            f"Path({str(captured)!r}).write_text(sys.stdin.read(), encoding='utf-8'); "
+            f"print({json.dumps(json.dumps(retried))} if p.exists() else '{{}}'); p.touch()"
+        )
         config["command"] = [sys.executable, "-c", retry_code]
         write_json(run_dir / "config.json", config)
         response, _ = transition(run_dir, "retry malformed output", True)
         assert response == retried and read_json(run_dir / "state.json")["revision"] == 4
+        captured_prompt = captured.read_text(encoding="utf-8")
+        assert '"capability":"not_allowed"' in captured_prompt and '"ok":false' in captured_prompt
+        assert "retry malformed output" in captured_prompt
+        assert not (run_dir / "action-feedback.json").exists()
 
         crash_state = {"todo": ["crash recovered"], "meta": {"old": "x"}}
         crash_intent = {
@@ -581,6 +655,9 @@ def self_test() -> None:
                     raise AssertionError("concurrent writer accepted")
             except RuntimeError:
                 pass
+        (run_dir / ".lock").write_text("stale pid", encoding="utf-8")
+        with run_lock(run_dir):
+            pass
     print("self-test: ok")
 
 

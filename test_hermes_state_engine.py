@@ -14,13 +14,47 @@ except ImportError:
     agent = types.ModuleType("agent")
     agent.__path__ = []
     context_engine = types.ModuleType("agent.context_engine")
+    context_compressor = types.ModuleType("agent.context_compressor")
 
     class ContextEngine:
         pass
 
+    class ContextCompressor(ContextEngine):
+        def __init__(self, model="", quiet_mode=False, **_):
+            self.model = model
+            self.quiet_mode = quiet_mode
+            self.context_length = 100
+            self.threshold_tokens = 50
+            self.last_prompt_tokens = 0
+            self.last_completion_tokens = 0
+            self.last_total_tokens = 0
+            self.compression_count = 0
+
+        def on_session_start(self, session_id, **_):
+            self.native_session_id = session_id
+
+        def on_session_reset(self):
+            self.compression_count = 0
+
+        def update_model(self, model, context_length, **_):
+            self.model = model
+            self.context_length = context_length
+            self.threshold_tokens = context_length // 2
+
+        def update_from_response(self, usage):
+            self.last_prompt_tokens = usage.get("prompt_tokens", 0)
+
+        def should_compress(self, prompt_tokens=None):
+            return (prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens) >= self.threshold_tokens
+
+        def compress(self, messages, **_):
+            return [{"role": "system", "content": "native compression"}, messages[-1]]
+
     context_engine.ContextEngine = ContextEngine
+    context_compressor.ContextCompressor = ContextCompressor
     sys.modules["agent"] = agent
     sys.modules["agent.context_engine"] = context_engine
+    sys.modules["agent.context_compressor"] = context_compressor
 
 from hermes_state_engine import (
     MAX_ITEM_CHARS,
@@ -29,9 +63,17 @@ from hermes_state_engine import (
     checkpoint_tool,
     state_prompt,
 )
+from agent.context_compressor import ContextCompressor
 
 
 class HermesStateEngineTest(unittest.TestCase):
+    def test_native_compressor_remains_active(self):
+        engine = SkillStateEngine()
+        engine.update_model("model", 100)
+        self.assertFalse(engine.should_compress(engine.threshold_tokens - 1))
+        self.assertTrue(engine.should_compress(engine.threshold_tokens))
+        self.assertIs(SkillStateEngine.compress, ContextCompressor.compress)
+
     def test_checkpoint_replaces_completed_turns_and_bounds_tool_loops(self):
         state = {
             "objective": "proof",
