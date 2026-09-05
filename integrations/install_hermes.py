@@ -33,11 +33,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--home", type=Path)
     parser.add_argument("--hermes", default="hermes")
+    parser.add_argument("--hermes-source", type=Path, help="Installed Hermes source; required for the explicit step-transition bridge")
     parser.add_argument("--mode", choices=["step", "turn"], default="step")
     parser.add_argument("--context-mode", choices=["strict", "evidence"], default="strict")
     parser.add_argument("--schema", type=Path, help="Optional domain JSON Schema (requires jsonschema in Hermes)")
     parser.add_argument("--state", type=Path, help="Initial state for the domain schema")
     args = parser.parse_args()
+    if args.mode == "step" and args.hermes_source is None:
+        parser.error("--mode step requires --hermes-source; no observer-hook mutation or two-call fallback is used")
     if bool(args.schema) != bool(args.state):
         parser.error("--schema and --state must be supplied together")
     domain = None
@@ -48,6 +51,9 @@ def main() -> int:
         Draft202012Validator.check_schema(domain[0])
         Draft202012Validator(domain[0]).validate(domain[1])
     home, env = resolve_home(args.hermes, args.home)
+    if args.mode == "step":
+        from hermes_transition_bridge import install_bridge
+        install_bridge(args.hermes_source)
 
     root = Path(__file__).resolve().parents[1]
     target = home / "plugins" / "skill-state"

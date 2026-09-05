@@ -6,7 +6,7 @@ SKILL.state replaces repeated conversation history with a compact, validated rec
 
 This is an independent implementation of [SKILL.state: Scalable Long-Horizon Agent Skills](https://arxiv.org/abs/2608.26263), with an optional evidence-retrieval extension. It runs with Hermes; a new harness is not required.
 
-**Status:** experimental. The original runtime has a recorded model benchmark. The newer Hermes integration has passing contract tests and local measurements, but has not yet been benchmarked end to end with a model.
+**Status:** experimental. Version 0.6 uses one model response for both state and action. It requires an explicit, reversible Hermes host bridge; it is a third-party integration, not an upstream built-in feature. Live measurements and failures are reported in [BENCHMARKS.md](BENCHMARKS.md); there is no universal speed, accuracy or cost claim.
 
 ## How it works
 
@@ -16,11 +16,23 @@ Each step supplies the model with:
 2. **State:** current facts, constraints, decisions and remaining work.
 3. **Observation:** the latest user input or tool result.
 
-The model proposes a state update. The runtime validates it before committing it, and execution continues from that state. Older reasoning and tool results are not replayed into every request. Hermes' system instructions, tool definitions and authorization remain in place.
+The model proposes a state update and an action (or final answer) in one response. The runtime validates and commits the state before returning the action to Hermes' existing dispatcher. Older reasoning and tool results are not replayed into every request. Hermes' system instructions, tool definitions and authorization remain in place.
 
 **Optional evidence mode** stores exact observations separately. The model can retrieve omitted details through bounded search and paginated reads. This adds no background summarizer or embedding-model calls; retrieval still consumes tokens when used.
 
 ## Measured results
+
+### Live Hermes: one-generation version 0.6 candidate
+
+Twenty paired short synthetic cases, with all provider responses counted:
+
+| Measurement | Vanilla Hermes | Skill-state |
+|---|---:|---:|
+| Exact final answers | 20/20 | 20/20 |
+| Total tokens, including cached input and output | 259,957 | 256,262 (**−1.42%**) |
+| Interaction time | 170.83 s | 353.49 s |
+
+Corrected-memory cases saved 10.81% of tokens; two-file tool chains used 9.38% more. More uncached input and generated output offset fewer cache reads, so these results **do not establish lower billing or compute cost**. Latency is secondary to token/resource consumption and preserved accuracy. Perfect scores on two templates are not a general accuracy guarantee. [Raw provider evidence](results/hermes-live-step-20.json) · [Method, failure history and limits](BENCHMARKS.md)
 
 ### Recorded model benchmark: original runtime
 
@@ -38,7 +50,7 @@ That is **13m 53s → 16m 18s**: fewer tokens, longer runtime. Context-input inc
 
 These results apply to the **original patched-CLI experiment**, not the newer per-step plugin. [Raw cases](results/runs/) · [Method and calculations](BENCHMARKS.md)
 
-### Local measurement: current per-step plugin
+### Historical local measurement: version 0.5 per-step plugin
 
 A scripted 200-action loop, measured in Linux/Python without an LLM or live Hermes. Extra state-update requests, protocol text and tool-schema sizes are included. Times are medians of seven repetitions.
 
@@ -57,18 +69,18 @@ Requires Python 3.12+ and an installed, configured Hermes exposing context-engin
 git clone https://github.com/Hikarea/skill-state.git
 cd skill-state
 python -m pip install -e .
-python integrations/install_hermes.py --mode step --context-mode strict
+python integrations/install_hermes.py --mode step --context-mode strict --hermes-source /path/to/hermes-agent
 ```
 
-Restart Hermes and start a new session. The installer selects this context engine; it does not patch Hermes source. If you explicitly select Hermes toolsets, include `context_engine` so its state-update tool is available.
+Replace the source placeholder with your Hermes checkout. The installer adds a small response-validation bridge to `agent/conversation_loop.py` and selects this context engine. It rejects incompatible host layouts. Restart Hermes and start a new session. If you explicitly select Hermes toolsets, include `context_engine` so its transition tool is available. Recheck compatibility after Hermes updates.
 
 To enable recovery of omitted historical details:
 
 ```bash
-python integrations/install_hermes.py --mode step --context-mode evidence
+python integrations/install_hermes.py --mode step --context-mode evidence --hermes-source /path/to/hermes-agent
 ```
 
-The native integration currently requires a separate state-update generation before each external action. Its extra calls must be included when measuring token savings. Short tasks may consume more tokens.
+The earlier two-generation adaptation could repeatedly update state without acting. Version 0.6 validates a single state-plus-action envelope before native dispatch. Its protocol and generated state still cost tokens; short tasks may consume more tokens and take longer.
 
 [Domain schemas, standalone runtime and rollback](docs/USAGE.md)
 
@@ -78,15 +90,15 @@ The native integration currently requires a separate state-update generation bef
 - State is limited to 16 KiB. Strict mode blocks oversized observations; evidence mode supplies a bounded excerpt and retrieval reference.
 - Step mode supports text. Use `--mode turn` for image/audio tasks and the earlier between-turn checkpoint behavior.
 - Keep one writer per session. Native tool execution, approvals and recovery remain Hermes' responsibility.
-- The new plugin's real-model token savings and task quality remain unmeasured.
+- The live benchmark uses two short synthetic task families, not long-horizon production work. Included subscription usage does not establish dollar savings.
 
 ## Verify
 
 ```bash
 python -m unittest -v
-python benchmark_context.py --repeats 7 --output results/context-local.json
+python -m unittest discover -s integrations -p test_hermes_transition_bridge.py
 ```
 
-Tests cover state validation, restart recovery, per-step history isolation, bounded context and evidence retrieval. Without Hermes installed, the tests use a minimal host contract. The local benchmark makes no model calls.
+Tests cover state validation, restart recovery, per-step history isolation, bounded context and evidence retrieval. Without Hermes installed, the tests use a minimal host contract. Use the live runner in BENCHMARKS.md for provider measurements; the historical local benchmark makes no model calls.
 
 [Architecture and paper fidelity](CONTEXT_DESIGN.md) · [Benchmark methodology](BENCHMARKS.md) · [MIT license](LICENSE)

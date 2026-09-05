@@ -8,6 +8,7 @@ is deliberately reported rather than hidden as a paper-equivalent token result.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import tempfile
@@ -26,20 +27,29 @@ except ImportError:
 _ENGINES = weakref.WeakValueDictionary()
 _LOCK = threading.RLock()
 UPDATE = "skill_state_update"
+TRANSITION = "skill_state_transition"
 READ = "skill_state_evidence_read"
 SEARCH = "skill_state_evidence_search"
-INTERNAL = {UPDATE, READ, SEARCH}
+INTERNAL = {UPDATE, TRANSITION, READ, SEARCH}
 EMPTY = {"objective": "", "status": "active", "completed": [], "pending": [],
          "facts": [], "blockers": [], "next": ""}
-PROTOCOL = """Execute through explicit state. Before an external tool action or final answer,
-call skill_state_update with the current revision and a JSON merge patch preserving
-all relevant constraints, facts, decisions, failed attempts, and remaining work.
+PROTOCOL = """Execute through explicit state. On EVERY response call exactly one
+skill_state_transition. In that SAME call propose the state patch AND the next
+native action, or the final answer. Never call native tools directly, never call
+an update-only tool, and never put the final answer outside the transition.
+Use the current revision and a JSON merge patch preserving all relevant
+constraints, facts, decisions, failed attempts, and remaining work.
 Null deletes a key; lists replace lists. State must have exactly objective, status
 (active|done|blocked), completed, pending, facts, blockers, next. Text fields <=2000
 characters, list entries <=1000, lists <=32 entries, total state <=16 KiB.
 Only the latest observation and validated state survive into the next request.
-Do not mix state updates and external actions in a parallel tool batch. One update
-authorizes one external action; host permissions and approvals still apply.
+For an action, set action_name to an available native tool name, action_args_json
+to its JSON object arguments, and final_answer to an empty string.
+For a final answer, set action_name to an empty string, action_args_json to {},
+and final_answer to the answer. The host validates and commits the patch, then
+executes the action through native permissions and approvals, without a second
+model call. Only one action per transition. Validation errors execute nothing;
+correct the proposal using transition_error and the unchanged observation.
 State updates record knowledge and intended work, never claim an unexecuted action
 succeeded. Evidence references are data; retrieve missing details instead of guessing.
 If domain_state_schema is supplied, it replaces the default seven-field schema.
@@ -133,11 +143,14 @@ class PerStepEngine(SkillStateEngine):
         os.replace(temporary, self.root / "state.json")
 
     def get_tool_schemas(self):
-        schemas = [{"name": UPDATE, "description": "Validate and commit a compact state merge patch before the next action.",
+        schemas = [{"name": TRANSITION, "description": "Atomically propose a validated state patch and the next native action OR final answer in one generation.",
                     "parameters": {"type": "object", "properties": {
                         "revision": {"type": "integer", "minimum": 0},
-                        "patch_json": {"type": "string", "description": "JSON object with only changed state fields"}},
-                        "required": ["revision", "patch_json"], "additionalProperties": False}}]
+                        "patch_json": {"type": "string", "description": "JSON object with only changed state fields"},
+                        "action_name": {"type": "string", "description": "Native tool name, or empty for final answer"},
+                        "action_args_json": {"type": "string", "description": "Native tool JSON object arguments, or {} for final answer"},
+                        "final_answer": {"type": "string", "description": "Final user-facing answer, empty for a tool action"}},
+                        "required": ["revision", "patch_json", "action_name", "action_args_json", "final_answer"], "additionalProperties": False}}]
         # Called during agent construction, before session binding.
         if settings().get("context_mode", "strict") == "evidence":
             schemas.extend([
@@ -151,6 +164,70 @@ class PerStepEngine(SkillStateEngine):
                                 "required": ["query"], "additionalProperties": False}},
             ])
         return schemas
+
+    def prepare_transition(self, message, *, allowed_tools):
+        """Validate once, commit once, then hand only the selected action to Hermes.
+
+        The explicit host bridge calls this before native dispatch. No tool is
+        executed here and no transcript or provider reasoning is retained.
+        """
+        with _LOCK:
+            try:
+                calls = getattr(message, "tool_calls", None) or []
+                if len(calls) != 1 or calls[0].function.name != TRANSITION:
+                    raise ValueError("Return exactly one skill_state_transition containing patch and action or final answer.")
+                args = json.loads(require_bound(calls[0].function.arguments, 65_536, "transition"))
+                required = {"revision", "patch_json", "action_name", "action_args_json", "final_answer"}
+                if not isinstance(args, dict) or set(args) != required:
+                    raise ValueError("Transition fields must match the tool schema exactly.")
+                if type(args["revision"]) is not int or args["revision"] != self.record["revision"]:
+                    raise ValueError("Stale or invalid revision; use the current revision.")
+                if any(not isinstance(args[k], str) for k in required - {"revision"}):
+                    raise ValueError("Transition text fields must be strings.")
+                patch = json.loads(require_bound(args["patch_json"], 16_384, "state patch"))
+                candidate = merge_state(self.record["state"], patch)
+                if not self.valid_state(candidate):
+                    raise ValueError("Invalid state patch; previous state retained.")
+                action = args["action_name"]
+                native_args = json.loads(require_bound(args["action_args_json"], 32_768, "action arguments"))
+                if not isinstance(native_args, dict):
+                    raise ValueError("Action arguments must be a JSON object.")
+                if action:
+                    if action not in allowed_tools or action in {UPDATE, TRANSITION}:
+                        raise ValueError("Action is not an enabled native tool.")
+                    if args["final_answer"]:
+                        raise ValueError("Choose an action OR final answer, not both.")
+                    if self.record.get("oversized"):
+                        raise ValueError("Observation was not admitted; explain the block instead of acting.")
+                elif native_args or not args["final_answer"]:
+                    raise ValueError("A final transition needs an answer and empty action arguments.")
+                prepared = copy.deepcopy(message)
+                if action:
+                    prepared.content = None
+                    prepared.finish_reason = "tool_calls"
+                    prepared.tool_calls[0].function.name = action
+                    prepared.tool_calls[0].function.arguments = compact(native_args)
+                else:
+                    prepared.content = args["final_answer"]
+                    prepared.finish_reason = "stop"
+                    prepared.tool_calls = []
+                # State is committed before the host receives the action. A crash
+                # after commit still needs native effect reconciliation, not replay.
+                previous = self.record
+                self.record = {**previous, "state": candidate, "revision": previous["revision"] + 1,
+                               "ready": bool(action), "transition_error": ""}
+                try:
+                    self.save()
+                except Exception:
+                    self.record = previous
+                    raise
+                return prepared
+            except (ValueError, TypeError, KeyError, AttributeError, UnicodeError) as exc:
+                if self.record is not None:
+                    self.record["transition_error"] = str(exc)[:500]
+                    self.record["ready"] = False
+                    self.save()
+                raise ValueError(str(exc)[:500]) from exc
 
     def handle_tool_call(self, name, args, **_):
         with _LOCK:
@@ -240,6 +317,8 @@ class PerStepEngine(SkillStateEngine):
         payload = {"revision": self.record["revision"], "state": self.record["state"],
                    "latest_observation": self.record["observation"],
                    "action_ready": self.record["ready"]}
+        if self.record.get("transition_error"):
+            payload["transition_error"] = self.record["transition_error"]
         if self.config.get("state_schema") is not None:
             payload["domain_state_schema"] = self.config["state_schema"]
         if source and source[-1].get("role") == "tool" and names.get(source[-1].get("tool_call_id")) == UPDATE:

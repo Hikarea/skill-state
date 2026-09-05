@@ -8,12 +8,14 @@ Run with the Python from your Hermes environment so the `jsonschema` dependency 
 
 ```bash
 python -m pip install -e .
-python integrations/install_hermes.py --mode step --context-mode evidence --schema examples/research.schema.json --state examples/research.initial.json
+python integrations/install_hermes.py --mode step --context-mode evidence --hermes-source /path/to/hermes-agent --schema examples/research.schema.json --state examples/research.initial.json
 ```
 
 Restart Hermes and start a new session. The schema is fixed within a session; changing it requires a new session or an explicit state migration. The installer saves settings to the selected Hermes home's `skill-state/config.json`. Reinstalling without schema arguments preserves an existing domain schema. To restore the generic schema, remove `state_schema` and `initial_state` from that file before starting a new session.
 
 Use `--home` when Hermes home cannot be discovered automatically. If Hermes itself is not on PATH, pass its executable through `--hermes`.
+
+Step mode requires the explicit source bridge supplied by this repository. It validates a state-plus-action response before Hermes dispatches the action; it does not replace Hermes' tool executor or authorization. This is not an upstream Hermes feature. The installer refuses incompatible source layouts; repeat compatibility checks after a Hermes update.
 
 ## Restore ordinary Hermes context management
 
@@ -23,6 +25,12 @@ hermes plugins disable skill-state
 ```
 
 Restart Hermes and start a new session. Stored state/evidence is retained. To use the earlier checkpoint-per-user-turn implementation instead, reinstall with `--mode turn` and restart; `--context-mode evidence` is a step-mode feature and does not add retrieval to turn mode.
+
+The bridge is inert with the ordinary compressor. To remove its exact source additions as well:
+
+```bash
+python integrations/hermes_transition_bridge.py /path/to/hermes-agent --uninstall
+```
 
 ## Standalone runtime
 

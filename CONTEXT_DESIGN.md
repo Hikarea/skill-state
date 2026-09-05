@@ -1,4 +1,4 @@
-# Per-step context, version 0.5
+# Per-step context, version 0.6
 
 Primary objective: minimize cumulative context-input and generated tokens at an acceptable task-success rate. Latency is a separately reported tradeoff, not a correctness gate. Billing must use provider prices and cache buckets, not raw input totals.
 
@@ -15,12 +15,12 @@ Native Hermes instructions, schemas for enabled tools, provider framing and any 
 | Path | Context boundary | Extra state generation | Tool executor |
 |---|---|---|---|
 | Strict standalone runtime | Every transition | None: patch + action in one response | Workspace capabilities |
-| Native Hermes `--mode step` | Every provider request; only current observation and state | Usually one extra generation per external action | Hermes, with native guards and approvals |
+| Hermes `--mode step` with explicit host bridge | Every normal provider request; only current observation and state | None: patch + action in one response | Hermes, with native guards and approvals |
 | Compatibility Hermes `--mode turn` | Between completed user turns | One checkpoint before final answer | Hermes |
 
-Native mode uses an internal `skill_state_update` tool and revision-checked merge patches. The `pre_tool_call` hook permits one external action after a valid state update; it does not execute tools or approve actions. Invalid updates retain state and expose a bounded correction message. The `pre_verify` hook requests a state update before a final answer when necessary. Mixed parallel state-update/action batches are unsupported; the protocol requests sequential calls. Hosts may limit verification continuations or fail open when plugin hooks fail, so this is not an independent security boundary.
+Step mode exposes `skill_state_transition`, containing a revision-checked merge patch and either one enabled action with JSON arguments or a final answer. The explicit host bridge invokes `prepare_transition` on the normalized response before observers and native dispatch. The engine validates the entire envelope, commits state, then translates it into a native tool call or final answer. It does not execute tools or approve actions. Invalid envelopes retain the prior state and expose bounded correction feedback; retries consume the normal iteration budget. Parallel action batches are unsupported. This remains an integration, not an independent security boundary.
 
-The extra native generation is a measurable adaptation, not an exact reproduction of the paper's one-response transition transport. For short tasks, it can consume MORE tokens. Do not call native mode an efficiency improvement until total input + output tokens, including these updates, are measured on real tasks.
+The version 0.5 two-generation adaptation failed the live transition gate by repeatedly saving state without acting. Version 0.6 removes that mismatch with Algorithm 1. Its bridge also prevents Hermes' extra terminal-summary generation when no valid final transition was produced. The original failure data is retained rather than presented as an efficacy estimate. One-response transport does not guarantee speed or savings: state output, schema and protocol overhead must all be counted.
 
 ## Optional evidence mode: proposed extension
 
@@ -32,12 +32,12 @@ This enables recovery when a detail was not recognized as relevant earlier, and 
 
 Standalone successful and failed action observations remain in a durable feedback record until the next committed transition consumes them. A preview never consumes feedback. A crash during an external effect still requires inspecting the effect and resolving the intent; no exactly-once external execution is claimed.
 
-Native state, revision and latest observation persist atomically within a session. Native Hermes remains responsible for its tool execution recovery. Revision checks protect against stale model patches, not concurrent processes writing the same session; keep one writer per session. Native session rotation/compression can start a new session id and is not a cross-session migration mechanism. Domain schemas must remain fixed within a session.
+Native state, revision and latest observation persist atomically within a session. The step adapter does not yet journal a pending native action: a crash between state commit and Hermes recording/dispatching the action requires manual inspection of state and external effects before resuming. Do not assume automatic reconciliation or exactly-once execution. Revision checks protect against stale model patches, not concurrent processes writing the same session; keep one writer per session. Native session rotation/compression can start a new session id and is not a cross-session migration mechanism. Domain schemas must remain fixed within a session.
 
 ## Verification and remaining gate
 
 `python -m unittest -v` checks invalid patches, nested null deletion, stable instructions, discarded reasoning, a 200-action single turn, recovery, strict overflow, scoped retrieval and an unanticipated-detail recovery case. When Hermes is unavailable, the host is stubbed; these are context-contract tests, not an end-to-end Hermes certification.
 
-`python benchmark_context.py` measures serialized request bytes for 10/50/100/200 scripted actions, counts the additional update requests, and compares against transcript replay. It also measures local context-management time, including native checkpoint persistence, over repeated runs. It makes no LLM calls and does not measure task accuracy, provider tokens, cost or end-to-end latency. See BENCHMARKS.md for the committed results and timing boundaries.
+`python benchmark_context.py` retains the historical two-generation fixture for 10/50/100/200 scripted actions. It counts the additional update requests and local context-management work but does not model the version 0.6 transition transport. It makes no LLM calls and does not measure task accuracy, provider tokens, cost or end-to-end latency. See BENCHMARKS.md for the committed results and timing boundaries; use the live runner for the current integration.
 
-The existing 20-case campaign remains historical evidence for the old patched-CLI experiment, with the legacy adapter explicitly pinned. It does not validate these new modes. A real deployment gate must compare ordinary Hermes, strict standalone and native step mode on the same model/settings and real tasks: file edits with changing requirements, failed actions and corrections, task switches, long tool loops, historical evidence queries and interrupted sessions. Record all provider input/cache/output usage, task outcomes and latency separately. No new provider benchmark or live Hermes installation was performed in this change.
+The original 20-case campaign and version 0.5 local byte benchmark remain historical evidence, not version 0.6 measurements. The new live Hermes runner captures provider usage at the transport boundary, including calls omitted from native session counters, and compares strict step mode with ordinary context selection. See BENCHMARKS.md for exact outcomes and limitations. Long tool loops, real file-edit tasks, historical evidence retrieval and interrupted-session recovery still require separate end-to-end evaluation; two short synthetic templates cannot certify them.

@@ -11,9 +11,8 @@ def register(ctx):
     if settings().get("mode", "turn") == "step":
         ctx.register_context_engine(PerStepEngine())
         ctx.register_system_prompt_section("skill-state.protocol", lambda _: PROTOCOL,
-                                           position="after_memory", max_chars=1800)
+                                           position="after_memory", max_chars=2400)
         ctx.register_hook("pre_tool_call", before_tool)
-        ctx.register_hook("pre_verify", before_final)
         return
     ctx.register_context_engine(ENGINE)
     ctx.register_system_prompt_section(

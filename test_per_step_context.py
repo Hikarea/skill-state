@@ -4,13 +4,14 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 import test_hermes_state_engine  # Supplies minimal host contracts when Hermes is absent.
 import skill_state as runtime
 from context_policy import EvidenceStore, byte_size, compact, merge_state, observation_for
-from hermes_step_engine import PerStepEngine, before_tool, before_final, UPDATE, READ, SEARCH
+from hermes_step_engine import PerStepEngine, before_tool, before_final, UPDATE, READ, SEARCH, TRANSITION
 
 
 class PerStepTests(unittest.TestCase):
@@ -61,6 +62,45 @@ class PerStepTests(unittest.TestCase):
         self.update({"facts": ["EXACT_NEW_EVIDENCE"], "next": "answer"})
         self.assertIsNone(before_final(session_id="test-session"))
 
+    def transition_message(self, **changes):
+        args = {"revision": self.engine.record["revision"], "patch_json": '{"objective":"read evidence"}',
+                "action_name": "read_file", "action_args_json": '{"path":"first.txt"}', "final_answer": ""}
+        args.update(changes)
+        return SimpleNamespace(content="private reasoning must not be replayed", tool_calls=[
+            SimpleNamespace(id="call-one", type="function", function=SimpleNamespace(name=TRANSITION, arguments=compact(args)))])
+
+    def test_one_generation_transition_commits_before_native_dispatch(self):
+        self.select()
+        message = self.transition_message()
+        prepared = self.engine.prepare_transition(message, allowed_tools={"read_file"})
+        self.assertEqual(message.tool_calls[0].function.name, TRANSITION)
+        self.assertEqual(prepared.tool_calls[0].function.name, "read_file")
+        self.assertIsNone(prepared.content)
+        persisted = json.loads((self.engine.root / "state.json").read_text())
+        self.assertEqual(persisted["revision"], 1)
+        self.assertIsNone(before_tool("read_file", session_id="test-session"))
+        self.tool_result("read_file", {}, "EVIDENCE")
+        self.select()
+        final = self.engine.prepare_transition(self.transition_message(action_name="", action_args_json="{}", final_answer="Exact answer"), allowed_tools={"read_file"})
+        self.assertEqual(final.content, "Exact answer")
+        self.assertEqual(final.tool_calls, [])
+        self.assertEqual(self.engine.record["revision"], 2)
+
+    def test_transition_validation_executes_nothing_and_preserves_observation(self):
+        self.select()
+        original = compact(self.engine.record["state"])
+        for changes in ({"action_name": "disabled_tool"}, {"patch_json": '{"status":null}'},
+                        {"revision": 99}, {"action_args_json": "[]"}, {"final_answer": "also final"}):
+            with self.assertRaises(ValueError):
+                self.engine.prepare_transition(self.transition_message(**changes), allowed_tools={"read_file"})
+            self.assertEqual(compact(self.engine.record["state"]), original)
+            self.assertEqual(self.engine.record["revision"], 0)
+            self.assertIn("TASK_SECRET", compact(self.select()))
+            self.assertIn("transition_error", compact(self.select()))
+            self.assertIsNotNone(before_tool("read_file", session_id="test-session"))
+        with self.assertRaises(ValueError):
+            self.engine.prepare_transition(SimpleNamespace(content="unvalidated final", tool_calls=[]), allowed_tools=set())
+
     def test_invalid_patch_and_stale_revision_do_not_change_state(self):
         self.select()
         self.update({"objective": "must survive"})
@@ -98,7 +138,9 @@ class PerStepTests(unittest.TestCase):
         self.select()
         sizes = []
         for index in range(200):
-            self.update({"objective": "fixed task", "facts": ["one durable fact"], "next": "inspect"})
+            self.engine.prepare_transition(self.transition_message(patch_json=compact({
+                "objective": "fixed task", "facts": ["one durable fact"], "next": "inspect"})),
+                allowed_tools={"read_file"})
             before_tool("read_file", session_id="test-session")
             self.tool_result("read_file", {}, f"observation-{index:04d}:" + "x" * 1000)
             selected = self.select()
