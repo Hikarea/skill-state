@@ -84,6 +84,7 @@ def run_state_only(workspace: Path, output: Path, items: list[str], expected: st
     config = {
         "harness": "hermes", "workspace": str(workspace),
         "model_timeout_seconds": 180,
+        "legacy_benchmark": True,
     }
     state_path = output / "state.json"
     skill_state.write_json(state_path, {
@@ -108,7 +109,7 @@ def run_state_only(workspace: Path, output: Path, items: list[str], expected: st
 
 
 def run_safety_checks(workspace: Path, seed: int) -> dict:
-    config = {"harness": "hermes", "workspace": str(workspace), "model_timeout_seconds": 180}
+    config = {"harness": "hermes", "workspace": str(workspace), "model_timeout_seconds": 180, "legacy_benchmark": True}
     missing_state = {"objective": "Answer only known facts", "facts": {}, "pending": ["Obtain deployment key"]}
     missing_prompt = skill_state.prompt_for(
         SPEC, SCHEMA,
@@ -177,7 +178,9 @@ def main() -> None:
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     workspace = output.parent / "workspace"
-    workspace.mkdir(parents=True, exist_ok=False)
+    # This tool-free benchmark recreates model sessions/state below. An interrupted
+    # attempt may leave the directory behind; its presence is not a resume failure.
+    workspace.mkdir(parents=True, exist_ok=True)
     items, expected, notebook_count, filler_lines = workload(args.seed)
     if args.order == "vanilla-first":
         vanilla = run_vanilla(workspace, output.parent, items, expected)
