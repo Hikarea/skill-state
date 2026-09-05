@@ -1,0 +1,170 @@
+{
+  "kind": "local scripted context mechanics; no LLM or live Hermes",
+  "measured_at_utc": "2026-09-05T01:28:24.844887+00:00",
+  "environment": {
+    "os": "Linux",
+    "machine": "x86_64",
+    "python": "3.12.13"
+  },
+  "repetitions": 7,
+  "source_sha256": {
+    "benchmark_context.py": "e1026bc4b917c499c223030567eee6bf149d5cae058bd826e830c8238eef98d2",
+    "hermes_step_engine.py": "7f75f116bab46b856170caa9a296eb97b9a59dbbdbd1d4131d5b3942875dc88a",
+    "context_policy.py": "bad50d1b286901f30839665fab8f51eb6fdef242fff60c38447620bc32cb17d3",
+    "test_per_step_context.py": "ca2bafacc2e946dbd1fddb5829f9a303fcc1541e54559071169f2187fa234e2b"
+  },
+  "method": "Fixed state; 1000 filler characters per action; native state-update requests, protocol and tool schemas counted. Timings sum context selection, checkpoint update/atomic persistence and message serialization for native; message serialization for transcript. Setup, synthetic external tool work, network and LLM time excluded. Fixture overhead is included in native update time. One warm-up, repeated runs, median times. The transcript baseline has no native Hermes compaction.",
+  "provider_tokens_measured": false,
+  "output_tokens_measured": false,
+  "end_to_end_latency_measured": false,
+  "runs": [
+    {
+      "actions": 10,
+      "native_requests": 22,
+      "transcript_requests": 11,
+      "native_cumulative_request_bytes": 62910,
+      "transcript_cumulative_request_bytes": 69427,
+      "native_peak_request_bytes": 2989,
+      "transcript_peak_request_bytes": 12436,
+      "request_byte_reduction_percent": 9.39,
+      "context_management_time": {
+        "native": {
+          "samples_ms": [
+            7.120366,
+            6.891849,
+            9.987594,
+            7.1982,
+            6.873833,
+            7.379497,
+            6.80467
+          ],
+          "median_ms": 7.120366
+        },
+        "transcript": {
+          "samples_ms": [
+            0.308544,
+            0.493397,
+            0.275845,
+            0.269017,
+            0.282386,
+            0.264241,
+            0.250131
+          ],
+          "median_ms": 0.275845
+        }
+      },
+      "context_time_change_percent": 2481.292392466784
+    },
+    {
+      "actions": 50,
+      "native_requests": 102,
+      "transcript_requests": 51,
+      "native_cumulative_request_bytes": 299602,
+      "transcript_cumulative_request_bytes": 1572069,
+      "native_peak_request_bytes": 2990,
+      "transcript_peak_request_bytes": 61488,
+      "request_byte_reduction_percent": 80.94,
+      "context_management_time": {
+        "native": {
+          "samples_ms": [
+            48.910282,
+            35.412421,
+            38.557196,
+            41.014414,
+            38.661529,
+            38.746026,
+            39.98493
+          ],
+          "median_ms": 38.746026
+        },
+        "transcript": {
+          "samples_ms": [
+            5.870462,
+            5.387611,
+            5.63286,
+            5.52455,
+            5.87185,
+            5.560306,
+            6.077442
+          ],
+          "median_ms": 5.63286
+        }
+      },
+      "context_time_change_percent": 587.8570743813978
+    },
+    {
+      "actions": 100,
+      "native_requests": 202,
+      "transcript_requests": 101,
+      "native_cumulative_request_bytes": 595507,
+      "transcript_cumulative_request_bytes": 6210894,
+      "native_peak_request_bytes": 2992,
+      "transcript_peak_request_bytes": 122838,
+      "request_byte_reduction_percent": 90.41,
+      "context_management_time": {
+        "native": {
+          "samples_ms": [
+            87.016425,
+            71.004798,
+            71.571764,
+            75.030564,
+            80.148598,
+            97.70427,
+            85.000868
+          ],
+          "median_ms": 80.148598
+        },
+        "transcript": {
+          "samples_ms": [
+            21.003061,
+            20.15295,
+            19.767041,
+            20.401955,
+            21.767793,
+            24.619509,
+            20.765958
+          ],
+          "median_ms": 20.765958
+        }
+      },
+      "context_time_change_percent": 285.9614759887312
+    },
+    {
+      "actions": 200,
+      "native_requests": 402,
+      "transcript_requests": 201,
+      "native_cumulative_request_bytes": 1187607,
+      "transcript_cumulative_request_bytes": 24691044,
+      "native_peak_request_bytes": 2992,
+      "transcript_peak_request_bytes": 245538,
+      "request_byte_reduction_percent": 95.19,
+      "context_management_time": {
+        "native": {
+          "samples_ms": [
+            163.160928,
+            166.669004,
+            164.399119,
+            216.561337,
+            183.530005,
+            165.772915,
+            171.197931
+          ],
+          "median_ms": 166.669004
+        },
+        "transcript": {
+          "samples_ms": [
+            76.680534,
+            77.746535,
+            78.553426,
+            87.295588,
+            79.253827,
+            77.03541,
+            81.08261
+          ],
+          "median_ms": 78.553426
+        }
+      },
+      "context_time_change_percent": 112.17280071272766
+    }
+  ]
+}

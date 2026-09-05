@@ -1,180 +1,92 @@
-# skill-state
+# SKILL.state
 
-Experimental, harness-neutral implementation of the execution architecture introduced in [*SKILL.state: Scalable Long-Horizon Agent Skills*](https://arxiv.org/abs/2608.26263) by Sanket Badhe, Priyanka Tiwari, and Jonghyun Chung (arXiv:2608.26263v3, 2026).
+**Explicit execution state for long-running LLM agents.**
 
-This is an independent proof of concept. It is not the authors' official implementation and is not affiliated with their institutions.
+SKILL.state replaces repeated conversation history with a compact, validated record of the current task. The goal is to reduce total token consumption while retaining the information needed to continue correctly.
 
-## Architecture
+This is an independent implementation of [SKILL.state: Scalable Long-Horizon Agent Skills](https://arxiv.org/abs/2608.26263), with an optional evidence-retrieval extension. It runs with Hermes; a new harness is not required.
 
-At step `t`, the model receives an immutable procedure `P`, validated structured state `S_t`, and the latest observation `O_t`. It proposes a state update and action; transient reasoning and older transcript messages are not inputs to the next fresh model call. This follows the paper's central abstraction:
+**Status:** experimental. The original runtime has a recorded model benchmark. The newer Hermes integration has passing contract tests and local measurements, but has not yet been benchmarked end to end with a model.
 
-```text
-A_t = (P, S_t, O_t)
-```
+## How it works
 
-Prompt size is bounded only when `P`, `S_t`, and `O_t` are themselves bounded. The schema must also be a sufficient statistic for future decisions. These are assumptions, not guarantees supplied by the package.
+Each step supplies the model with:
 
-The runtime enforces:
+1. **Procedure:** the task's instructions and state schema.
+2. **State:** current facts, constraints, decisions and remaining work.
+3. **Observation:** the latest user input or tool result.
 
-- JSON Schema validation before state commits
-- a 16 KiB serialized-state limit at every state trust boundary
-- 0-3 fresh-call repair attempts after invalid model output (default: two)
-- procedure and schema hash checks before transitions
-- atomic state-file replacement and an OS-released one-writer lock per run
-- workspace-confined filesystem capabilities; no model-selected subprocesses
-- durable transition intents, action results, failed-action feedback, and append-only state-audit records
+The model proposes a state update. The runtime validates it before committing it, and execution continues from that state. Older reasoning and tool results are not replayed into every request. Hermes' system instructions, tool definitions and authorization remain in place.
 
-The Python runtime uses the standard library plus `jsonschema`.
+**Optional evidence mode** stores exact observations separately. The model can retrieve omitted details through bounded search and paginated reads. This adds no background summarizer or embedding-model calls; retrieval still consumes tokens when used.
 
-## Install and use
+## Measured results
 
-```powershell
+### Recorded model benchmark: original runtime
+
+20 paired synthetic tasks using Hermes v0.21.0 and GPT-5.6 Terra. The task was retaining three designated facts among disposable text. Values below are totals across the 20 cases, excluding separate safety probes.
+
+| Measurement | Transcript baseline | State-only | Change |
+|---|---:|---:|---:|
+| Context-input tokens | 1,060,932 | 501,825 | **−52.7%** |
+| Generated tokens | 3,830 | 8,565 | +123.6% |
+| Total processed tokens | 1,064,762 | 510,390 | **−52.1%** |
+| Elapsed time | 833.01 s | 978.04 s | **+17.4%** |
+| Correct answers | 20/20 | 20/20 | Unchanged |
+
+That is **13m 53s → 16m 18s**: fewer tokens, longer runtime. Context-input includes cache reads; these totals are not billing estimates. The previously reported 46.5% token reduction and 17.1% time increase are averages of per-case percentages, rather than changes in campaign totals.
+
+These results apply to the **original patched-CLI experiment**, not the newer per-step plugin. [Raw cases](results/runs/) · [Method and calculations](BENCHMARKS.md)
+
+### Local measurement: current per-step plugin
+
+A scripted 200-action loop, measured in Linux/Python without an LLM or live Hermes. Extra state-update requests, protocol text and tool-schema sizes are included. Times are medians of seven repetitions.
+
+| Measurement | Transcript replay | Per-step state | Change |
+|---|---:|---:|---:|
+| Cumulative request bytes | 24,691,044 | 1,187,607 | **−95.19%** |
+| Local context-management time | 78.55 ms | 166.67 ms | **+112.2%** |
+
+The plugin spends an additional **88.12 ms across 200 actions** on local context work, including checkpoint persistence. This measures neither provider tokens nor full response time. The comparison is against uncompressed transcript replay, not a live run of ordinary Hermes. [Raw timings and source hashes](results/context-local.json)
+
+## Use with Hermes
+
+Requires Python 3.12+ and an installed, configured Hermes exposing context-engine plugin hooks. The `hermes` command must be available in the shell.
+
+```bash
+git clone https://github.com/Hikarea/skill-state.git
+cd skill-state
 python -m pip install -e .
-skill-state self-test
+python integrations/install_hermes.py --mode step --context-mode strict
 ```
 
-Create `spec.md`, `schema.json`, and a conforming `initial-state.json`, then initialize a run:
+Restart Hermes and start a new session. The installer selects this context engine; it does not patch Hermes source. If you explicitly select Hermes toolsets, include `context_engine` so its state-update tool is available.
 
-```powershell
-skill-state init repair-api `
-  --spec .\spec.md `
-  --schema .\schema.json `
-  --state .\initial-state.json `
-  --workspace . `
-  --harness codex `
-  --allow read_text `
-  --allow write_text
+To enable recovery of omitted historical details:
+
+```bash
+python integrations/install_hermes.py --mode step --context-mode evidence
 ```
 
-Preview or execute a transition:
+The native integration currently requires a separate state-update generation before each external action. Its extra calls must be included when measuring token savings. Short tasks may consume more tokens.
 
-```powershell
-skill-state step repair-api --observation "Tests fail in auth.test.ts"
-skill-state step repair-api --observation "Tests fail in auth.test.ts" --execute
-skill-state run repair-api --observation "Tests fail in auth.test.ts" --max-steps 20
-```
-
-`step` is a preview unless `--execute` is supplied. `run` is execution consent. State and audit data default to `%USERPROFILE%\.skillstate\runs\<name>`.
-
-After an interrupted capability, inspect the external system before resolving its durable intent:
-
-```powershell
-skill-state recover repair-api --result succeeded
-skill-state recover repair-api --result failed
-```
-
-## Harness adapters
-
-Adapters are implemented for fresh, noninteractive Codex CLI, Claude Code, Hermes, and arbitrary commands that accept a prompt on standard input and return the five-field JSON envelope. The new Hermes adapter runs `hermes_worker.py` with the Python executable selected by `--hermes-python`; use Hermes' installed virtual environment. It uses Hermes provider resolution with an empty toolset, fresh history, and no optional memory/context-file loading. It does not require the historical `state-only` CLI patch. Native mandatory host instructions remain. Adapter presence is not a performance claim.
-
-## Per-step context management
-
-The objective is lower cumulative **input + output token consumption at acceptable task quality**. Speed is a separate tradeoff. The current branch adds per-action Hermes context selection, domain schemas, durable successful observations, and optional bounded evidence retrieval. Read [CONTEXT_DESIGN.md](CONTEXT_DESIGN.md) for exact guarantees, differences from the paper, and validation limits.
-
-| Mode | Behavior |
-|---|---|
-| Strict standalone | One response proposes a state delta and action; next call receives only procedure/schema, state and latest observation. Oversized input is rejected. |
-| Native Hermes step | Replaces old user and tool history on every request. A revision-checked state update precedes each native action. Usually needs an extra generation per action. |
-| Evidence extension | Stores exact observations locally; sends bounded excerpts and references, with explicit paginated retrieval. No summarizer or embedding calls. |
-| Compatibility turn | Previous plugin behavior: compacts only between completed user turns. |
-
-The state is bounded to 16 KiB. Standalone prompts and observations also have configurable UTF-8 byte limits (`--max-prompt-bytes`, `--max-observation-bytes`). Bytes are not provider tokens. Enable standalone evidence with `--context-mode evidence --allow evidence_read --allow evidence_search`. The runtime now re-injects a successful tool result after restart until a committed transition consumes it.
-
-### Standalone Hermes plugin
-
-The plugin is installed separately into Hermes and uses its context-engine and tool APIs. Ordinary plugin use does not patch the Hermes application:
-
-```powershell
-python .\integrations\install_hermes.py --mode step --context-mode strict
-```
-
-Restart Hermes Desktop, its gateway, or the CLI after installation and start a new session. If you override Hermes toolsets, include `context_engine`; state tools are otherwise unavailable. Step mode keeps native system/developer messages and uses Hermes' existing tool authorization path. It does not delete local audit history. Do not mix state updates and actions in parallel batches. This text-first mode does not yet have a tested native multimodal adapter; use turn mode for image/audio tasks.
-
-To allow recovering omitted historical details, install with `--context-mode evidence`. To retain the old between-turn behavior, use `--mode turn`.
-
-A domain schema can replace the generic checkpoint fields (requires `jsonschema` in Hermes' Python environment):
-
-```powershell
-python .\integrations\install_hermes.py --mode step --context-mode evidence `
-  --schema .\examples\research.schema.json --state .\examples\research.initial.json
-```
-
-The research schema tracks constraints, claims with sources and verification status, open questions and failed attempts. It validates structure, not truth. Keep the schema fixed within a session.
-
-The plugin contains no marker parser and no output-transformation hook. Generic checkpoints are limited to 16 KiB, 32 entries per list, 2,000 characters for `objective`/`next`, and 1,000 characters per list entry. Contract tests cover per-step isolation, invalid patches, persistence, evidence recovery and a 200-action single turn. These use a minimal host contract when Hermes is absent; they are not a live Hermes/provider certification.
-
-```powershell
-python -m unittest -v
-python benchmark_context.py
-```
-
-The second command measures serialized request **bytes**, including extra state-update requests and tool-schema overhead. It makes no model calls and does not claim token, billing or accuracy improvements.
-
-## Committed experiment
-
-**Historical baseline:** the following measurements apply to the original patched-CLI experiment, not the new native per-step/evidence modes. The benchmark explicitly retains its legacy adapter for replication.
-
-### Question
-
-On one synthetic continuity task family, does state-only fresh-call execution reduce model-context tokens without reducing exact-answer success relative to a resumed transcript?
-
-### Method
-
-- 20 paired cases, seeds 200-219, on Windows with Hermes Agent v0.21.0 and GPT-5.6 Terra through the `openai-codex` provider.
-- Each pair used identical durable values and transient notebooks. Cases varied 2-6 notebooks and 40-160 filler lines per notebook.
-- Execution order was balanced 10/10 overall and within the notebook-count strata.
-- The vanilla condition resumed one Hermes transcript. The state-only condition made fresh calls with only the procedure, schema, current state, and latest observation.
-- A small, checksum-recorded Hermes patch enabled resumable one-shot baseline calls and an empty benchmark toolset. It is not required by the standalone plugin.
-- Primary descriptive endpoints were exact-answer success and context-input tokens. Secondary endpoints were processed tokens, final-turn context, two sampled safety checks, and wall time.
-- The campaign made 300 model calls. Committed per-case reports and state snapshots are under [`results/runs`](results/runs/).
-
-### Results
-
-| Endpoint | Observed result |
-|---|---:|
-| Exact-answer success, vanilla | 20/20 |
-| Exact-answer success, state-only | 20/20 |
-| Unknown-fact refusal check | 20/20 |
-| Fresh-call isolation check | 20/20 |
-| Context-input reduction | 47.1% mean, 12.1% sample SD, 21.7%-65.7% range |
-| Processed-token reduction | 46.5% mean, 12.2% sample SD, 21.0%-65.3% range |
-| Final-turn context reduction | 72.2% mean, 12.5% sample SD, 43.2%-88.2% range |
-| Wall-time change | **17.1% slower** mean; 14.1% slower median |
-| State-only faster | 3/20 |
-| Composite functional-and-latency gate | 5/20 |
-
-`context-input tokens` includes cache-read tokens because cached tokens still occupy model context. `processed tokens` is input plus cache-read plus output tokens; it is not a billing estimate.
-
-The supported conclusion is narrow: all 20 committed cases preserved the exact answer while using fewer context tokens. The experiment found no speed improvement. Because both variants scored 20/20, it provides no evidence that state-only execution is more accurate. It also does not establish lower cost, production safety, cross-model generality, or performance in Codex Desktop.
-
-No inferential p-value is reported: these are related cases from one synthetic task family, not a random sample from a defined task population.
-
-### Verify or replicate
-
-Recompute every committed aggregate from the per-case reports:
-
-```powershell
-python -m unittest -v test_benchmark_results.py
-```
-
-Run a new 20-case campaign (requires a configured Hermes provider):
-
-```powershell
-python .\benchmark_campaign.py `
-  --runs 20 `
-  --start-seed 200 `
-  --output .\benchmark-output\aggregate.json
-```
+[Domain schemas, standalone runtime and rollback](docs/USAGE.md)
 
 ## Limits
 
-- A state schema can discard a fact whose future relevance was not recognized.
-- Historical-provenance tasks need history; the audit log is not injected into prompts automatically.
-- The runtime is single-agent. Concurrent writers need explicit conflict semantics.
-- The safety checks are sampled behaviors, not privacy or isolation proofs.
-- Audit records may contain observations and model responses and therefore require appropriate protection.
-- There is no supported Codex Desktop transcript-replacement integration in this repository. Host-level context control is required for that claim.
+- Validation checks state structure, not truth or completeness. The model can still omit an important fact.
+- State is limited to 16 KiB. Strict mode blocks oversized observations; evidence mode supplies a bounded excerpt and retrieval reference.
+- Step mode supports text. Use `--mode turn` for image/audio tasks and the earlier between-turn checkpoint behavior.
+- Keep one writer per session. Native tool execution, approvals and recovery remain Hermes' responsibility.
+- The new plugin's real-model token savings and task quality remain unmeasured.
 
-## Status
+## Verify
 
-Proof of concept. Do not describe it as generally faster, cheaper, or more accurate without workload-specific evidence.
+```bash
+python -m unittest -v
+python benchmark_context.py --repeats 7 --output results/context-local.json
+```
+
+Tests cover state validation, restart recovery, per-step history isolation, bounded context and evidence retrieval. Without Hermes installed, the tests use a minimal host contract. The local benchmark makes no model calls.
+
+[Architecture and paper fidelity](CONTEXT_DESIGN.md) · [Benchmark methodology](BENCHMARKS.md) · [MIT license](LICENSE)
