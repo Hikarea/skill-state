@@ -1,4 +1,4 @@
 name: skill-state
-version: "0.4.0"
-description: Bounded-state context plugin layered over native Hermes compression
+version: "0.5.0"
+description: Per-step bounded state with optional paged evidence, using native Hermes tools
 license: MIT

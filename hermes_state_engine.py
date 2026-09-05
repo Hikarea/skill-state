@@ -61,7 +61,7 @@ def _valid(value: Any) -> bool:
     if not all(isinstance(value[key], str) and len(value[key]) <= MAX_TEXT_CHARS
                for key in ("objective", "next")):
         return False
-    if value["status"] not in _STATUSES:
+    if not isinstance(value["status"], str) or value["status"] not in _STATUSES:
         return False
     if not all(
         isinstance(value[key], list)

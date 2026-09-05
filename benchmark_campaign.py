@@ -66,7 +66,8 @@ def main() -> None:
             sys.executable, str(script), "--output", str(report_path),
             "--seed", str(seed), "--order", order,
         ]
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
+        print(f"running {index + 1}/{args.runs}: seed={seed} order={order}; model calls may take several minutes", flush=True)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=4000)
         if result.returncode:
             raise RuntimeError(f"seed {seed} failed: {(result.stderr or result.stdout).strip()}")
         reports.append(json.loads(report_path.read_text(encoding="utf-8")))

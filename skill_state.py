@@ -16,11 +16,14 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
+from context_policy import EvidenceStore, observation_for, require_bound
 
 HOME = Path.home() / ".skillstate"
-CAPABILITIES = {"list_files", "read_text", "write_text", "mkdir"}
+CAPABILITIES = {"list_files", "read_text", "write_text", "mkdir", "evidence_read", "evidence_search"}
 MAX_ACTION_BYTES = 100_000
 MAX_STATE_BYTES = 16_384
+MAX_PROMPT_BYTES = 65_536
+MAX_OBSERVATION_BYTES = 16_384
 ENVELOPE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -55,8 +58,8 @@ def merge_patch(base, patch):
     for key, value in patch.items():
         if value is None:
             out.pop(key, None)
-        elif isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = merge_patch(out[key], value)
+        elif isinstance(value, dict):
+            out[key] = merge_patch(out.get(key) if isinstance(out.get(key), dict) else {}, value)
         else:
             out[key] = value
     return out
@@ -71,6 +74,8 @@ def validate(value, schema, path="state") -> None:
 
 
 def validate_state(value, schema, path="state") -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: execution state must be an object")
     validate(value, schema, path)
     try:
         size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -151,10 +156,17 @@ def harness_command(config: dict, schema_path: Path, output_path: Path, prompt: 
     if harness == "claude":
         return ["claude", "-p", "--no-session-persistence", "--tools", "", "--json-schema", json.dumps(ENVELOPE_SCHEMA, separators=(",", ":")), "--output-format", "json"]
     if harness == "hermes":
-        command = ["hermes", "--ignore-rules", "--reasoning", "minimal", "--toolsets", "state-only"]
+        if config.get("legacy_benchmark"):
+            command = ["hermes", "--ignore-rules", "--reasoning", "minimal", "--toolsets", "state-only"]
+            if usage_path is not None:
+                command += ["--usage-file", str(usage_path)]
+            return [*command, "chat", "--query-file", "-", "--oneshot"]
+        # Use the Hermes Python environment explicitly; no custom CLI toolset or host patch.
+        command = [config.get("hermes_python") or sys.executable,
+                   str(Path(__file__).with_name("hermes_worker.py"))]
         if usage_path is not None:
             command += ["--usage-file", str(usage_path)]
-        return [*command, "chat", "--query-file", "-", "--oneshot"]
+        return command
     return config["command"]
 
 
@@ -178,6 +190,7 @@ def parse_response(harness: str, stdout: str, output_path: Path) -> dict:
 
 
 def invoke(config: dict, prompt: str) -> tuple[dict, dict | None]:
+    require_bound(prompt, config.get("max_prompt_bytes", MAX_PROMPT_BYTES), "complete prompt")
     harness = config["harness"]
     with tempfile.TemporaryDirectory(prefix="skillstate-") as temp:
         temp_dir = Path(temp)
@@ -359,6 +372,12 @@ def finish_intent(run_dir: Path, intent: dict) -> None:
             "ok": False,
             "error": intent.get("error") or "action failed",
         })
+    elif intent.get("action_observation") is not None:
+        # Do not lose a successful result between process exit and the next model call.
+        write_json(run_dir / "action-feedback.json", {
+            "transition_id": intent["id"], "ok": True,
+            "observation": intent["action_observation"],
+        })
     (run_dir / "pending-action.json").unlink(missing_ok=True)
 
 
@@ -419,10 +438,15 @@ def transition(run_dir: Path, observation: str, execute: bool) -> tuple[dict, st
             + "\n\nLatest external observation:\n"
             + observation
         )
+    archive = EvidenceStore(run_dir / "evidence") if config.get("context_mode") == "evidence" else None
+    effective_observation = observation_for(
+        effective_observation, limit=config.get("max_observation_bytes", MAX_OBSERVATION_BYTES), archive=archive,
+    )
     prompt = prompt_for(
         (run_dir / "spec.md").read_text(encoding="utf-8"), schema,
         state_doc["state"], effective_observation, config["allowed_capabilities"],
     )
+    require_bound(prompt, config.get("max_prompt_bytes", MAX_PROMPT_BYTES), "complete prompt")
     envelope, candidate, usage = propose(config, prompt, state_doc["state"], schema)
     if not execute:
         return envelope, None
@@ -446,9 +470,21 @@ def execute_intent(run_dir: Path, config: dict, intent: dict) -> str | None:
     intent["phase"] = "started"
     write_json(pending_path, intent)
     try:
-        action_observation = execute_action(
-            config, intent["response"]["action_argv"], intent["response"]["action_cwd"]
-        )
+        argv = intent["response"]["action_argv"]
+        if argv and argv[0] in {"evidence_read", "evidence_search"}:
+            if config.get("context_mode") != "evidence" or argv[0] not in config["allowed_capabilities"]:
+                raise RuntimeError("evidence capability not enabled")
+            archive = EvidenceStore(run_dir / "evidence")
+            if argv[0] == "evidence_search" and len(argv) == 2:
+                value = archive.search(argv[1])
+            elif argv[0] == "evidence_read" and 2 <= len(argv) <= 4:
+                value = archive.read(argv[1], int(argv[2]) if len(argv) > 2 else 0,
+                                     int(argv[3]) if len(argv) > 3 else 2000)
+            else:
+                raise ValueError("use evidence_search query or evidence_read id [offset] [limit]")
+            action_observation = json.dumps(value, ensure_ascii=False)
+        else:
+            action_observation = execute_action(config, argv, intent["response"]["action_cwd"])
     except Exception as exc:
         intent.update(phase="ambiguous" if isinstance(exc, subprocess.TimeoutExpired) else "failed", error=str(exc))
         write_json(pending_path, intent)
@@ -478,15 +514,27 @@ def command_init(args) -> None:
     if unknown:
         raise ValueError(f"unknown capabilities: {', '.join(sorted(unknown))}")
     config = {"harness": args.harness, "command": args.command, "workspace": str(Path(args.workspace).resolve()), "allowed_capabilities": capabilities, "validation_retries": args.validation_retries, "model_timeout_seconds": args.model_timeout}
+    config.update(context_mode=args.context_mode, hermes_python=args.hermes_python,
+                  max_prompt_bytes=args.max_prompt_bytes, max_observation_bytes=args.max_observation_bytes)
     if args.harness == "command" and not args.command:
         raise ValueError("--command is required for command harness")
     write_json(run_dir / "config.json", config)
     print(run_dir)
 
 
+def input_observation(args, run_dir: Path) -> str:
+    if args.observation is not None:
+        return args.observation
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    if (run_dir / "action-feedback.json").exists() or (run_dir / "pending-action.json").exists():
+        return ""
+    raise ValueError("provide --observation or pipe an observation on stdin")
+
+
 def command_step(args) -> None:
     run_dir = HOME / "runs" / args.name
-    observation = args.observation if args.observation is not None else sys.stdin.read()
+    observation = input_observation(args, run_dir)
     with run_lock(run_dir):
         envelope, action_observation = transition(run_dir, observation, args.execute)
     print(json.dumps({"response": envelope, "action_observation": action_observation}, ensure_ascii=False, indent=2))
@@ -494,16 +542,17 @@ def command_step(args) -> None:
 
 def command_run(args) -> None:
     run_dir = HOME / "runs" / args.name
-    observation = args.observation if args.observation is not None else sys.stdin.read()
+    observation = input_observation(args, run_dir)
     with run_lock(run_dir):
         for _ in range(args.max_steps):
             envelope, action_observation = transition(run_dir, observation, True)
-            print(json.dumps(envelope, ensure_ascii=False))
+            print(json.dumps(envelope, ensure_ascii=False), flush=True)
             if envelope["status"] != "continue":
                 return
             if action_observation is None:
                 raise RuntimeError("continue response requires an action")
-            observation = action_observation
+            # Durable feedback is consumed by the next committed transition, including after restart.
+            observation = ""
     raise RuntimeError(f"max steps reached: {args.max_steps}")
 
 
@@ -551,8 +600,8 @@ def self_test() -> None:
     hermes_command = harness_command({"harness": "hermes"}, Path("schema"), Path("output"), "latest only")
     assert "--ephemeral" in codex_command and "--output-schema" in codex_command
     assert "--no-session-persistence" in claude_command and "--json-schema" in claude_command
-    assert hermes_command[-4:] == ["chat", "--query-file", "-", "--oneshot"]
-    assert "state-only" in hermes_command and "latest only" not in hermes_command
+    assert Path(hermes_command[1]).name == "hermes_worker.py"
+    assert "state-only" not in hermes_command and "latest only" not in hermes_command
     envelope = {"state_patch_json": json.dumps({"todo": []}), "action_argv": ["write_text", "result.txt", "next observation"], "action_cwd": "", "status": "continue", "message": "ok"}
     assert parse_response("claude", json.dumps({"structured_output": envelope}), Path("unused")) == envelope
     assert parse_response("claude", json.dumps({"result": json.dumps(envelope)}), Path("unused")) == envelope
@@ -675,6 +724,10 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--allow", action="append", choices=sorted(CAPABILITIES), default=[])
     init.add_argument("--validation-retries", type=int, choices=range(0, 4), default=2)
     init.add_argument("--model-timeout", type=int, default=900)
+    init.add_argument("--context-mode", choices=["strict", "evidence"], default="strict")
+    init.add_argument("--hermes-python", help="Python executable in the installed Hermes environment")
+    init.add_argument("--max-prompt-bytes", type=int, default=MAX_PROMPT_BYTES)
+    init.add_argument("--max-observation-bytes", type=int, default=MAX_OBSERVATION_BYTES)
     init.set_defaults(func=command_init)
     step = sub.add_parser("step")
     step.add_argument("name")

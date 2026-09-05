@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skill-state-runtime"
-version = "0.1.0"
+version = "0.2.0"
 description = "Harness-neutral runtime for bounded structured execution state"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,4 +15,4 @@ dependencies = ["jsonschema>=4,<5"]
 skill-state = "skill_state:main"
 
 [tool.setuptools]
-py-modules = ["skill_state"]
+py-modules = ["skill_state", "context_policy", "hermes_worker"]

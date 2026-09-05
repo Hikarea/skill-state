@@ -65,21 +65,54 @@ skill-state recover repair-api --result failed
 
 ## Harness adapters
 
-Adapters are implemented for fresh, noninteractive Codex CLI, Claude Code, Hermes, and arbitrary commands that accept a prompt on standard input and return the five-field JSON envelope. The Hermes adapter uses `chat --query-file - --oneshot`, so the prompt is sent on standard input instead of a command-line argument. Adapter presence is not a performance claim; this repository's committed experiment used only Hermes.
+Adapters are implemented for fresh, noninteractive Codex CLI, Claude Code, Hermes, and arbitrary commands that accept a prompt on standard input and return the five-field JSON envelope. The new Hermes adapter runs `hermes_worker.py` with the Python executable selected by `--hermes-python`; use Hermes' installed virtual environment. It uses Hermes provider resolution with an empty toolset, fresh history, and no optional memory/context-file loading. It does not require the historical `state-only` CLI patch. Native mandatory host instructions remain. Adapter presence is not a performance claim.
+
+## Per-step context management
+
+The objective is lower cumulative **input + output token consumption at acceptable task quality**. Speed is a separate tradeoff. The current branch adds per-action Hermes context selection, domain schemas, durable successful observations, and optional bounded evidence retrieval. Read [CONTEXT_DESIGN.md](CONTEXT_DESIGN.md) for exact guarantees, differences from the paper, and validation limits.
+
+| Mode | Behavior |
+|---|---|
+| Strict standalone | One response proposes a state delta and action; next call receives only procedure/schema, state and latest observation. Oversized input is rejected. |
+| Native Hermes step | Replaces old user and tool history on every request. A revision-checked state update precedes each native action. Usually needs an extra generation per action. |
+| Evidence extension | Stores exact observations locally; sends bounded excerpts and references, with explicit paginated retrieval. No summarizer or embedding calls. |
+| Compatibility turn | Previous plugin behavior: compacts only between completed user turns. |
+
+The state is bounded to 16 KiB. Standalone prompts and observations also have configurable UTF-8 byte limits (`--max-prompt-bytes`, `--max-observation-bytes`). Bytes are not provider tokens. Enable standalone evidence with `--context-mode evidence --allow evidence_read --allow evidence_search`. The runtime now re-injects a successful tool result after restart until a committed transition consumes it.
 
 ### Standalone Hermes plugin
 
 The plugin is installed separately into Hermes and uses its context-engine and tool APIs. Ordinary plugin use does not patch the Hermes application:
 
 ```powershell
-python .\integrations\install_hermes.py
+python .\integrations\install_hermes.py --mode step --context-mode strict
 ```
 
-Restart Hermes Desktop, its gateway, or the CLI after installation. The plugin saves a validated checkpoint through an internal tool and promotes it only after Hermes reports that the turn completed successfully. At the next user turn, it replaces prior completed-turn messages with that checkpoint while retaining stable system/developer messages and only the current turn's assistant/tool messages. A missed or invalid checkpoint fails open for the following turn instead of compacting from stale state. Long current-turn tool loops still use Hermes' native compressor. The plugin does not delete Hermes' local audit history. If you override Hermes toolsets on the command line, include `context_engine`; otherwise the checkpoint tool is intentionally unavailable.
+Restart Hermes Desktop, its gateway, or the CLI after installation and start a new session. If you override Hermes toolsets, include `context_engine`; state tools are otherwise unavailable. Step mode keeps native system/developer messages and uses Hermes' existing tool authorization path. It does not delete local audit history. Do not mix state updates and actions in parallel batches. This text-first mode does not yet have a tested native multimodal adapter; use turn mode for image/audio tasks.
 
-The plugin contains no marker parser and no output-transformation hook. Checkpoints are limited to 16 KiB, 32 entries per list, 2,000 characters for `objective`/`next`, and 1,000 characters per list entry. Its contract tests verify persistence, freshness, deterministic bounds, next-turn context selection, and native-compressor composition.
+To allow recovering omitted historical details, install with `--context-mode evidence`. To retain the old between-turn behavior, use `--mode turn`.
+
+A domain schema can replace the generic checkpoint fields (requires `jsonschema` in Hermes' Python environment):
+
+```powershell
+python .\integrations\install_hermes.py --mode step --context-mode evidence `
+  --schema .\examples\research.schema.json --state .\examples\research.initial.json
+```
+
+The research schema tracks constraints, claims with sources and verification status, open questions and failed attempts. It validates structure, not truth. Keep the schema fixed within a session.
+
+The plugin contains no marker parser and no output-transformation hook. Generic checkpoints are limited to 16 KiB, 32 entries per list, 2,000 characters for `objective`/`next`, and 1,000 characters per list entry. Contract tests cover per-step isolation, invalid patches, persistence, evidence recovery and a 200-action single turn. These use a minimal host contract when Hermes is absent; they are not a live Hermes/provider certification.
+
+```powershell
+python -m unittest -v
+python benchmark_context.py
+```
+
+The second command measures serialized request **bytes**, including extra state-update requests and tool-schema overhead. It makes no model calls and does not claim token, billing or accuracy improvements.
 
 ## Committed experiment
+
+**Historical baseline:** the following measurements apply to the original patched-CLI experiment, not the new native per-step/evidence modes. The benchmark explicitly retains its legacy adapter for replication.
 
 ### Question
 
