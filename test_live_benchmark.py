@@ -4,12 +4,37 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
+import contextlib
+import io
 
-from benchmark_live_hermes import workload
+from benchmark_live_hermes import campaign, workload
 from summarize_live_benchmark import summarize
 
 
 class LiveBenchmarkTests(unittest.TestCase):
+    def test_campaign_retains_source_and_stops_on_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = root / "hermes"
+            (host / "agent").mkdir(parents=True)
+            source = host / "agent/conversation_loop.py"
+            source.write_bytes(b"original source")
+            args = SimpleNamespace(output=root / "results", hermes_source=host,
+                                   hermes_home=root, pairs=4)
+            def changed_worker(*args, **kwargs):
+                source.write_bytes(b"changed source")
+                return SimpleNamespace(returncode=1)
+            with patch("benchmark_live_hermes.subprocess.check_output",
+                       side_effect=lambda *a, **kw: "fixture" if kw.get("text") else b""), \
+                 patch("benchmark_live_hermes.subprocess.run", side_effect=changed_worker), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, "Runtime source changed"):
+                    campaign(args)
+            self.assertEqual((args.output / "source/hermes_conversation_loop.py").read_bytes(), b"original source")
+            self.assertEqual(len(json.loads((args.output / "campaign.json").read_text())["runs"]), 1)
+
     def test_workload_corrections_and_order_balance(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

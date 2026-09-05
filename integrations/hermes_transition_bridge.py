@@ -20,7 +20,9 @@ TRANSITION_HOOK = '''            # Optional explicit context-engine transition (
                     assistant_message = _transition_engine.prepare_transition(
                         assistant_message,
                         allowed_tools={
-                            tool["function"]["name"] for tool in (agent.tools or [])
+                            tool["function"]["name"] for tool in (
+                                (agent.tools if tools_for_api is None else tools_for_api) or []
+                            )
                             if isinstance(tool, dict) and tool.get("type") == "function"
                         },
                     )

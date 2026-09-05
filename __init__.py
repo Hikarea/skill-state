@@ -7,7 +7,7 @@ def register(ctx):
     import os
     if os.environ.get("SKILL_STATE_PROPOSAL_WORKER") == "1":
         return
-    from .hermes_step_engine import PerStepEngine, PROTOCOL, before_tool, before_final, settings
+    from .hermes_step_engine import PerStepEngine, PROTOCOL, before_tool, settings
     if settings().get("mode", "turn") == "step":
         ctx.register_context_engine(PerStepEngine())
         ctx.register_system_prompt_section("skill-state.protocol", lambda _: PROTOCOL,

@@ -62,11 +62,25 @@ def campaign(args):
                     hermes_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=args.hermes_source)),
                     hermes_diff_sha256=hashlib.sha256(subprocess.check_output(["git", "diff", "HEAD"], cwd=args.hermes_source)).hexdigest(),
                     started_utc=datetime.now(timezone.utc).isoformat())
+    # Retain exact local source bytes, not only hashes. Host source may contain
+    # unrelated private edits: these snapshots require review before publication.
+    sources = {name: root / name for name in FILES}
+    sources.update({"benchmark_live_hermes.py": Path(__file__).resolve(),
+                    "hermes_transition_bridge.py": root / "integrations/hermes_transition_bridge.py",
+                    "hermes_conversation_loop.py": args.hermes_source / "agent/conversation_loop.py"})
+    snapshot = args.output / "source"
+    snapshot.mkdir()
+    for name, source in sources.items():
+        shutil.copy2(source, snapshot / name)
+    manifest["source_snapshot_hashes"] = {name: hashlib.sha256((snapshot / name).read_bytes()).hexdigest() for name in sources}
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     rows = []
     for seed in seeds:
         order = ["vanilla", "skill_state"] if (seed // 2) % 2 == 0 else ["skill_state", "vanilla"]
         for arm in order:
+            if any(hashlib.sha256(source.read_bytes()).hexdigest() != manifest["source_snapshot_hashes"][name]
+                   for name, source in sources.items()):
+                raise RuntimeError("Runtime source changed during campaign; retained runs are partial evidence only")
             target = args.output / f"{seed}-{arm}.json"
             command = [sys.executable, str(Path(__file__).resolve()), "--hermes-source", str(args.hermes_source),
                        "--hermes-home", str(args.hermes_home), "--arm", arm, "--seed", str(seed), "--output", str(target.resolve())]

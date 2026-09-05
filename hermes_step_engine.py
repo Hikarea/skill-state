@@ -1,8 +1,7 @@
 """Opt-in per-action Hermes context engine.
 
-Hermes retains tool execution and authorization. State updates are separate native
-tool calls: two generations per action are normally required. This transport cost
-is deliberately reported rather than hidden as a paper-equivalent token result.
+Hermes retains tool execution and authorization. An explicit host bridge validates
+one state-plus-action response before handing the action to native dispatch.
 """
 
 from __future__ import annotations
