@@ -16,7 +16,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
-from context_policy import EvidenceStore, observation_for, require_bound
+from context_policy import EvidenceStore, compact, merge_state as merge_patch, observation_for, require_bound
 
 HOME = Path.home() / ".skillstate"
 CAPABILITIES = {"list_files", "read_text", "write_text", "mkdir", "evidence_read", "evidence_search"}
@@ -51,20 +51,6 @@ def write_json(path: Path, value) -> None:
     os.replace(tmp, path)
 
 
-def merge_patch(base, patch):
-    if not isinstance(patch, dict):
-        raise ValueError("state patch must be an object")
-    out = dict(base)
-    for key, value in patch.items():
-        if value is None:
-            out.pop(key, None)
-        elif isinstance(value, dict):
-            out[key] = merge_patch(out.get(key) if isinstance(out.get(key), dict) else {}, value)
-        else:
-            out[key] = value
-    return out
-
-
 def validate(value, schema, path="state") -> None:
     Draft202012Validator.check_schema(schema)
     errors = sorted(Draft202012Validator(schema).iter_errors(value), key=lambda error: list(error.path))
@@ -78,7 +64,7 @@ def validate_state(value, schema, path="state") -> None:
         raise ValueError(f"{path}: execution state must be an object")
     validate(value, schema, path)
     try:
-        size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        size = len(compact(value).encode("utf-8"))
     except UnicodeEncodeError as exc:
         raise ValueError(f"{path}: invalid Unicode") from exc
     if size > MAX_STATE_BYTES:
@@ -142,6 +128,7 @@ Use no prior conversation. Propose one bounded next action only. Do not execute 
 Return exactly one JSON object with all five keys: state_patch_json, action_argv, action_cwd, status, message.
 Return state_patch_json as a JSON object encoded in a string; null deletes a key.
 Patches merge recursively. Preserve every schema-required field; use its empty value rather than null when completed.
+Emit only changed fields; use {{}} if nothing changed. Replace obsolete values instead of appending a history. Keep future-required facts, constraints and unresolved work.
 Return action_argv as [capability, ...arguments], or [] when no action is needed. Available capabilities: {available}.
 Return action_cwd as a workspace-relative directory, or "" for workspace root.
 Set status to exactly continue, done, or blocked. Never use running. Set done only when procedure is complete, blocked only when user input is required.

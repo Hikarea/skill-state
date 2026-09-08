@@ -10,7 +10,50 @@ The paper's constant-context claim is conditional on bounded procedure, schema, 
 
 Native Hermes instructions, schemas for enabled tools, provider framing and any host-added material are additional overhead. The standalone assembled-prompt limit is checked before the harness call; it is not an exact limit on a hosted provider's complete serialized request. Native selection preserves system/developer messages unchanged. Configure the host's memory/skill injection separately if it duplicates execution state. This plugin does not erase host policy or impersonate system messages with archived text.
 
-## Three execution paths
+## Mathematical contract
+
+Following section 3 of the paper, write a transition as
+`S_next = M(S, delta)` and a request as `C = encode(P, schema, S, O)`.
+The shared `context_policy.merge_state` defines M for both standalone and step
+engines: objects merge recursively, null deletes a member, and arrays/scalars
+replace their previous value. It does not mutate either input or share mutable
+result values with them. Schema and byte validation must succeed before commit.
+Standalone validation rejects non-finite numbers, which are not JSON numbers.
+
+For JSON object states and patches:
+
+- Identity: `M(S, {}) = S`.
+- Idempotence: `M(M(S, d), d) = M(S, d)`.
+- Conflicting patches generally do not commute: their order is meaningful.
+- Merging two patches with M is **not** a valid general composition rule: null
+  deletion markers can disappear. Apply ordered transitions separately.
+
+These follow by induction over object nesting: each leaf is unchanged, deleted
+or replaced; recursively patched objects obey the same rules. Idempotent state
+updates do not imply idempotent external actions or exactly-once execution.
+Tests exercise these laws and alias isolation; they are not a formal proof of
+the entire runtime or of model accuracy.
+
+If the encoded procedure/schema overhead is bounded by Bp, state by Bs,
+observation by Bo and framing by Bf, then each admitted request satisfies
+`|C_t| <= Bp + Bs + Bo + Bf`, hence cumulative input is at most
+`T * (Bp + Bs + Bo + Bf)`. This is a byte bound here, not a token or billing
+estimate. Unbounded host additions, retries, outputs or retrieval steps need
+their own bounds; the input inequality does not bound total generated tokens.
+
+Preserving accuracy requires an additional **semantic assumption**: histories
+mapped to the same state must be equivalent for future task decisions given
+the same new observations. A schema validator cannot establish that condition.
+If future questions can distinguish arbitrarily many histories, bounded state
+alone cannot preserve every answer; retain external evidence or reject that
+task contract. A smaller state is not automatically a sufficient state.
+
+The implementation therefore requests sparse deltas (`{}` for no change),
+replacement of obsolete facts and retention of future-required constraints.
+It does not deterministically delete facts merely to meet a budget. These are
+implementation refinements, not new scientific results or measured savings.
+
+## Execution-path comparison
 
 | Path | Context boundary | Extra state generation | Tool executor |
 |---|---|---|---|

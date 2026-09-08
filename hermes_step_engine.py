@@ -38,6 +38,8 @@ native action, or the final answer. Never call native tools directly, never call
 an update-only tool, and never put the final answer outside the transition.
 Use the current revision and a JSON merge patch preserving all relevant
 constraints, facts, decisions, failed attempts, and remaining work.
+Emit only changed fields; use {} if unchanged. Replace obsolete values rather
+than append history; retain failed attempts only when needed to avoid repeating them.
 Null deletes a key; lists replace lists. State must have exactly objective, status
 (active|done|blocked), completed, pending, facts, blockers, next. Text fields <=2000
 characters, list entries <=1000, lists <=32 entries, total state <=16 KiB.

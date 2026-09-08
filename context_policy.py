@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -24,16 +25,23 @@ def require_bound(text: str, limit: int, label: str) -> str:
 
 
 def merge_state(base: dict, patch: dict) -> dict:
+    """Object merge with null deletion; result owns its mutable values.
+
+    Empty patches preserve values, applying a patch twice is idempotent, and
+    conflicting patches are order-sensitive. Neither input is mutated.
+    """
+    if not isinstance(base, dict):
+        raise ValueError("execution state must be an object")
     if not isinstance(patch, dict):
         raise ValueError("state patch must be an object")
-    result = dict(base)
+    result = copy.deepcopy(base)
     for key, value in patch.items():
         if value is None:
             result.pop(key, None)
         elif isinstance(value, dict):
             result[key] = merge_state(result.get(key) if isinstance(result.get(key), dict) else {}, value)
         else:
-            result[key] = value
+            result[key] = copy.deepcopy(value)
     return result
 
 
