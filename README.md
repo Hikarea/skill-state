@@ -86,6 +86,10 @@ The earlier two-generation adaptation could repeatedly update state without acti
 
 ## Limits
 
+Codex Desktop checkpoint hooks are not state-only context replacement. The
+inspected local hook was switched to passive archival; native Desktop integration
+is not implemented. See [Codex capability boundary and requirements](docs/CODEX.md).
+
 - Validation checks state structure, not truth or completeness. The model can still omit an important fact.
 - State is limited to 16 KiB. Strict mode blocks oversized observations; evidence mode supplies a bounded excerpt and retrieval reference.
 - Step mode supports text. Use `--mode turn` for image/audio tasks and the earlier between-turn checkpoint behavior.
